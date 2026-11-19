@@ -73,13 +73,10 @@ The DMGs are built by GitHub Actions on GitHub's Mac machines (`.github/workflow
 it runs the tests, builds the app for Apple silicon and Intel, signs it ad hoc, runs a self-test
 of the built app, and makes the DMGs.
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-A tag starting with `v` publishes a GitHub Release with both DMGs, so the download links above
-always point at the newest version. The app checks for newer releases and offers a download.
+To publish: change `__version__` in `pipfucci/__init__.py` (for example to `0.1.1`) and push to
+`main`. When that version has no release yet, the workflow builds both DMGs and publishes a
+GitHub Release tagged `v0.1.1`, so the download links above always point at the newest version.
+Other pushes only run the tests. The app checks for newer releases and offers a download.
 
 ## Running from source
 

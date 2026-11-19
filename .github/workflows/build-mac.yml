@@ -1,9 +1,11 @@
 name: Build Mac app
 
-# Push a version tag (for example v0.1.0) to build both DMGs and publish them as a GitHub Release.
-# "Run workflow" on the Actions tab builds them too, as downloadable artifacts, without a release.
+# Every push to main runs the tests. When the version in pipfucci/__init__.py has no release yet,
+# both DMGs are built and published as a GitHub Release (tag v<version>) automatically.
+# Pushing a v* tag or clicking "Run workflow" on the Actions tab also builds them.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -21,8 +23,25 @@ jobs:
       - run: pip install -r packaging/requirements-test.txt
       - run: python -m pytest -q tests
 
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      new: ${{ steps.v.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="$(python3 -c 'import re;print(re.search(r"__version__ = \"([^\"]+)\"", open("pipfucci/__init__.py").read()).group(1))')"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if gh release view "v$V" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "new=false" >> "$GITHUB_OUTPUT"; else echo "new=true" >> "$GITHUB_OUTPUT"; fi
+          echo "version $V"
+
   build:
-    needs: test
+    needs: [test, version]
+    if: needs.version.outputs.new == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -53,9 +72,8 @@ jobs:
 
       - name: Record version and repository in the app
         run: |
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="$(.venv/bin/python -c 'import pipfucci; print(pipfucci.__version__)')"; fi
+          VERSION="${{ needs.version.outputs.version }}"
           printf 'GITHUB_REPO = "%s"\nBUILD_VERSION = "%s"\n' "$GITHUB_REPOSITORY" "$VERSION" > pipfucci/_build_info.py
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Build PIP-FUCCI.app
         run: .venv/bin/pyinstaller packaging/pip_fucci.spec --noconfirm
@@ -86,8 +104,8 @@ jobs:
           path: PIP-FUCCI-${{ matrix.label }}.dmg
 
   release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, version]
+    if: needs.version.outputs.new == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -96,6 +114,9 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: PIP-FUCCI ${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           files: "*.dmg"
           body: |
             **Which file?** Apple menu > About This Mac. If it says *Apple M1/M2/M3/M4…* download **PIP-FUCCI-AppleSilicon.dmg**; if it says *Intel*, download **PIP-FUCCI-Intel.dmg**.
