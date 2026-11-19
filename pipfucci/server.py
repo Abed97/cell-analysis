@@ -71,6 +71,8 @@ class AppState:
         self.cancel = threading.Event()
         self.lock = threading.RLock()
         self.update_info = None
+        self.restart_requested = False
+        self.healthy = False
 
     # ---------------- recent experiments
     def recent(self) -> list:
@@ -142,7 +144,16 @@ def experiment_state(exp) -> dict:
 
 def state() -> dict:
     from .segment import cellpose_available
+    from .updater import UPDATER, mark_healthy
 
+    if not STATE.healthy:  # the window loaded and asked for state: this version works
+        STATE.healthy = True
+        try:
+            just = mark_healthy()
+            if just:
+                UPDATER._set(just_updated=just)
+        except Exception:
+            pass
     return {
         "app": APP_NAME, "version": __version__, "repo": GITHUB_REPO, "platform": sys.platform,
         "native_dialogs": STATE.window is not None or sys.platform == "darwin",
@@ -360,7 +371,11 @@ class Handler(BaseHTTPRequestHandler):
             if ep == "durations":
                 return self._json(analysis.durations_by_condition(need_results()))
             if ep == "update":
-                return self._json(check_update())
+                from .updater import UPDATER
+
+                if UPDATER.status["enabled"]:
+                    return self._json(UPDATER.snapshot())
+                return self._json({**check_update(), "enabled": False})
             return self._send(404, b"unknown endpoint", "text/plain")
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
@@ -415,6 +430,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"path": str(out)})
             if ep == "reveal":
                 reveal(b.get("path") or str(need_exp().results_dir))
+                return self._json({"ok": True})
+            if ep == "restart":
+                from .updater import UPDATER
+
+                if STATE.progress.get("running"):
+                    raise ValueError("Wait for the analysis to finish before restarting.")
+                if UPDATER.status.get("state") != "ready":
+                    raise ValueError("No update is ready yet.")
+                if STATE.window is None:
+                    raise ValueError("Restart is only available in the app window.")
+                STATE.restart_requested = True
+                threading.Timer(0.3, STATE.window.destroy).start()
                 return self._json({"ok": True})
             if ep == "open_url":
                 open_url(b.get("url", ""))

@@ -1,16 +1,20 @@
 name: Build Mac app
 
-# Every push to main runs the tests. When the version in pipfucci/__init__.py has no release yet,
-# both DMGs are built and published as a GitHub Release (tag v<version>) automatically.
-# Pushing a v* tag or clicking "Run workflow" on the Actions tab also builds them.
+# Every push to main (except documentation-only changes) is tested, built for Apple silicon and
+# Intel, and published as a GitHub Release numbered <major>.<minor>.<build>. Installed apps
+# download the newest release in the background and switch to it the next time they open.
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    paths-ignore: ["**.md"]
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -27,21 +31,17 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
-      new: ${{ steps.v.outputs.new }}
     steps:
       - uses: actions/checkout@v4
       - id: v
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="$(python3 -c 'import re;print(re.search(r"__version__ = \"([^\"]+)\"", open("pipfucci/__init__.py").read()).group(1))')"; fi
+          BASE="$(python3 -c 'import re;print(".".join(re.search(r"__version__ = \"([^\"]+)\"", open("pipfucci/__init__.py").read()).group(1).split(".")[:2]))')"
+          V="$BASE.$GITHUB_RUN_NUMBER"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          if gh release view "v$V" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "new=false" >> "$GITHUB_OUTPUT"; else echo "new=true" >> "$GITHUB_OUTPUT"; fi
           echo "version $V"
 
   build:
     needs: [test, version]
-    if: needs.version.outputs.new == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -71,9 +71,7 @@ jobs:
             -r packaging/requirements-mac.txt
 
       - name: Record version and repository in the app
-        run: |
-          VERSION="${{ needs.version.outputs.version }}"
-          printf 'GITHUB_REPO = "%s"\nBUILD_VERSION = "%s"\n' "$GITHUB_REPOSITORY" "$VERSION" > pipfucci/_build_info.py
+        run: printf 'GITHUB_REPO = "%s"\nBUILD_VERSION = "%s"\n' "$GITHUB_REPOSITORY" "${{ needs.version.outputs.version }}" > pipfucci/_build_info.py
 
       - name: Build PIP-FUCCI.app
         run: .venv/bin/pyinstaller packaging/pip_fucci.spec --noconfirm
@@ -84,7 +82,26 @@ jobs:
           codesign --verify --deep --strict --verbose=2 dist/PIP-FUCCI.app
 
       - name: Self-test the built app (demo data, analysis, export, server)
+        env:
+          PIPFUCCI_NO_UPDATES: "1"
         run: dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --selftest
+
+      - name: Package the app for automatic updates
+        run: |
+          ditto -c -k --keepParent dist/PIP-FUCCI.app "PIP-FUCCI-${{ matrix.label }}.app.zip"
+          shasum -a 256 "PIP-FUCCI-${{ matrix.label }}.app.zip" | cut -d' ' -f1 > "PIP-FUCCI-${{ matrix.label }}.app.zip.sha256"
+
+      - name: Test the update handoff (installed app starts a newer downloaded copy)
+        run: |
+          export PIPFUCCI_SUPPORT_DIR="$RUNNER_TEMP/support"
+          mkdir -p "$PIPFUCCI_SUPPORT_DIR/versions" "$RUNNER_TEMP/x"
+          ditto -x -k "PIP-FUCCI-${{ matrix.label }}.app.zip" "$RUNNER_TEMP/x"
+          mv "$RUNNER_TEMP/x/PIP-FUCCI.app" "$PIPFUCCI_SUPPORT_DIR/versions/PIP-FUCCI-999.0.0.app"
+          out="$(dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --whoami)"
+          echo "$out"
+          [[ "$out" == *"PIP-FUCCI-999.0.0.app"* ]]
+          # the unzipped copy must still be runnable (signature intact after the zip round trip)
+          PIPFUCCI_NO_UPDATES=1 "$PIPFUCCI_SUPPORT_DIR/versions/PIP-FUCCI-999.0.0.app/Contents/MacOS/PIP-FUCCI" --selftest
 
       - name: Make the DMG
         run: |
@@ -100,29 +117,49 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dmg-${{ matrix.label }}
-          path: PIP-FUCCI-${{ matrix.label }}.dmg
+          name: mac-${{ matrix.label }}
+          path: |
+            PIP-FUCCI-${{ matrix.label }}.dmg
+            PIP-FUCCI-${{ matrix.label }}.app.zip
+            PIP-FUCCI-${{ matrix.label }}.app.zip.sha256
 
   release:
     needs: [build, version]
-    if: needs.version.outputs.new == 'true'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: dmg-*
+          pattern: mac-*
           merge-multiple: true
+      - name: Release notes
+        env:
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          {
+            echo "### What changed"
+            echo
+            echo "${MSG:-Manual build}"
+            echo
+            echo "Installed copies of PIP-FUCCI download this version automatically and switch to it the next time they open."
+            echo
+            echo "**New install:** Apple menu > About This Mac shows *Apple M…* → **PIP-FUCCI-AppleSilicon.dmg**, *Intel* → **PIP-FUCCI-Intel.dmg**. Open it, drag PIP-FUCCI to Applications, and follow *How to open PIP-FUCCI the first time.pdf* inside. Needs macOS 12 or later."
+          } > notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
           name: PIP-FUCCI ${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
-          files: "*.dmg"
-          body: |
-            **Which file?** Apple menu > About This Mac. If it says *Apple M1/M2/M3/M4…* download **PIP-FUCCI-AppleSilicon.dmg**; if it says *Intel*, download **PIP-FUCCI-Intel.dmg**.
-
-            1. Open the DMG and drag **PIP-FUCCI** onto **Applications**.
-            2. The first time only: double-click PIP-FUCCI, click **Done** on the warning, then open **System Settings › Privacy & Security**, scroll down and click **Open Anyway**, enter your password, then **Open**.
-            3. After that it opens like any other app.
-
-            Needs macOS 12 or later.
+          body_path: notes.md
+          make_latest: "true"
+          files: |
+            *.dmg
+            *.app.zip
+            *.app.zip.sha256
+      - name: Keep only the 10 newest releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
+          while read -r tag; do gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag; done

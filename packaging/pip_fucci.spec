@@ -10,7 +10,7 @@ sys.path.insert(0, ROOT)
 from pipfucci import __version__  # noqa: E402
 
 hidden = ["pipfucci." + m for m in ("app", "server", "experiment", "pipeline", "segment", "track", "phases",
-                                     "analysis", "export", "render", "demo", "io_incucyte", "settings")]
+                                     "analysis", "export", "render", "demo", "io_incucyte", "settings", "updater")]
 for pkg in ("skimage.feature", "skimage.segmentation", "skimage.filters", "skimage.registration"):
     hidden += collect_submodules(pkg)
 if sys.platform == "darwin":

@@ -922,15 +922,40 @@ document.addEventListener('keydown', (ev) => {
 let rz;
 window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (S.view === 'viewer') drawScatter(); if (S.view === 'cells') drawHeat(); }, 150); });
 
+// ---------------------------------------------------------------- updates
+async function refreshUpdate() {
+  let u;
+  try { u = await api('update'); } catch (e) { return; }
+  const box = document.getElementById('update');
+  const wrap = (inner) => `<div class="small" style="display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:1px solid #23282D">${inner}</div>`;
+  if (u.just_updated) toast(`PIP-FUCCI updated to version ${u.just_updated}.`);
+  if (!u.enabled) {  // running from source: just say a new release exists
+    box.innerHTML = u.available ? wrap(`<span>Version ${esc(u.latest)} is available.</span><button class="btn sm" id="upd">Download update</button>`) : '';
+    const b = $('#upd'); if (b) b.onclick = () => api('open_url', { url: u.url }).catch(fail);
+    return;
+  }
+  if (u.state === 'downloading' || u.state === 'installing') {
+    box.innerHTML = wrap(`<span>Downloading update ${esc(u.latest || '')}…</span><div class="bar"><div style="width:${Math.round((u.progress || 0) * 100)}%"></div></div>`);
+  } else if (u.state === 'ready') {
+    const busy = S.st && S.st.progress && S.st.progress.running;
+    box.innerHTML = wrap(`<span>Update ${esc(u.ready_version)} is ready. It installs the next time PIP-FUCCI opens.</span>
+      <button class="btn sm" id="restart" ${busy ? 'disabled title="Wait for the analysis to finish"' : ''}>Restart now</button>`);
+    $('#restart').onclick = async () => {
+      try { await api('restart', {}); box.innerHTML = wrap('<span>Restarting…</span>'); } catch (e) { fail(e); }
+    };
+  } else {
+    box.innerHTML = '';
+  }
+  const fast = u.state === 'downloading' || u.state === 'installing' || u.state === 'checking';
+  clearTimeout(S.updTimer);
+  S.updTimer = setTimeout(refreshUpdate, fast ? 1500 : 30000);
+}
+
 // ---------------------------------------------------------------- start
 (async function start() {
   try {
     await refreshState();
     render();
-    const u = await api('update');
-    if (u.available) {
-      document.getElementById('update').innerHTML = `<div class="small" style="display:flex;flex-direction:column;gap:6px;padding-top:6px;border-top:1px solid #23282D"><span>Version ${esc(u.latest)} is available.</span><button class="btn sm" id="upd">Download update</button></div>`;
-      $('#upd').onclick = () => api('open_url', { url: u.url }).catch(fail);
-    }
+    refreshUpdate();
   } catch (e) { fail(e); }
 })();

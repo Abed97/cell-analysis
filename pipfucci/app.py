@@ -61,16 +61,23 @@ def main(argv=None) -> int:
     p.add_argument("--port", type=int, default=0)
     p.add_argument("--selftest", action="store_true")
     p.add_argument("--folder", help="open this experiment folder at start")
+    p.add_argument("--whoami", action="store_true", help="print the running executable and exit (update test)")
     # macOS passes -psn_* when launched from Finder on old systems
     args, _ = p.parse_known_args(argv)
 
     if args.selftest:
         return selftest()
+    if args.whoami:
+        print(sys.executable, flush=True)
+        return 0
 
     _setup_logging()
     from .server import STATE, open_folder, serve
 
+    from .updater import UPDATER
+
     srv, port = serve(args.port)
+    UPDATER.start()
     url = f"http://127.0.0.1:{port}/"
     if args.folder:
         try:
@@ -95,6 +102,13 @@ def main(argv=None) -> int:
         )
         STATE.window = window
         webview.start()
+        if STATE.restart_requested:
+            from .updater import restart_into_newest
+
+            try:
+                restart_into_newest()
+            except Exception as e:  # noqa: BLE001
+                print("restart failed:", e, flush=True)
         os._exit(0)  # stop worker processes and the server with the window
     else:
         import webbrowser
