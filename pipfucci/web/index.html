@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PIP-FUCCI</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app">
+  <nav class="side" aria-label="Workflow">
+    <div class="brand">
+      <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><circle cx="11" cy="12" r="7.5" fill="#3FBF6A" fill-opacity="0.9"></circle><circle cx="19" cy="12" r="7.5" fill="#E5486E" fill-opacity="0.85"></circle><circle cx="15" cy="19" r="7.5" fill="#F2C94C" fill-opacity="0.85"></circle></svg>
+      <div><div class="brand-name">PIP-FUCCI</div><div class="muted small">Incucyte analysis</div></div>
+    </div>
+    <div class="steps" id="steps">
+      <button type="button" class="step" data-view="experiment"><span class="num">1</span>Experiment</button>
+      <button type="button" class="step" data-view="viewer"><span class="num">2</span>Segment &amp; gate</button>
+      <button type="button" class="step" data-view="population"><span class="num">3</span>Population</button>
+      <button type="button" class="step" data-view="cells"><span class="num">4</span>Single cells</button>
+    </div>
+    <div class="side-foot">
+      <div class="local">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3FBF6A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg>
+        Runs on this Mac
+      </div>
+      <p class="muted small">No account or sign-in. Images and results stay in your own folders.</p>
+      <div class="kv small"><span class="muted">Version</span><span class="mono" id="version">–</span></div>
+      <div id="update"></div>
+    </div>
+  </nav>
+  <main id="main" tabindex="-1"></main>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

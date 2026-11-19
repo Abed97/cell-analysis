@@ -1,0 +1,22 @@
+[project]
+name = "pip-fucci"
+version = "0.1.0"
+description = "PIP-FUCCI Incucyte analysis: segmentation, tracking and cell-cycle phase calling, as a Mac app."
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26", "scipy>=1.11", "scikit-image>=0.22", "pandas>=2.1", "tifffile>=2023.7", "pillow>=10", "pywebview>=5; sys_platform == 'darwin'"]
+
+[project.optional-dependencies]
+cellpose = ["cellpose>=3,<4"]
+
+[project.scripts]
+pip-fucci = "pipfucci.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pipfucci*"]
+
+[tool.setuptools.package-data]
+pipfucci = ["web/*"]

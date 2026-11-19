@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+dmg/
+*.dmg
+pipfucci/_build_info.py
+.pytest_cache/

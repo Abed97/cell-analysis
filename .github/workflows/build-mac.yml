@@ -1,0 +1,107 @@
+name: Build Mac app
+
+# Push a version tag (for example v0.1.0) to build both DMGs and publish them as a GitHub Release.
+# "Run workflow" on the Actions tab builds them too, as downloadable artifacts, without a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r packaging/requirements-test.txt
+      - run: python -m pytest -q tests
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: aarch64-apple-darwin
+            label: AppleSilicon
+          - runner: macos-15-intel
+            platform: x86_64-apple-darwin
+            label: Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies (wheels that run on macOS 12 and later)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+        run: |
+          python -m venv .venv
+          uv pip install --python .venv/bin/python --python-platform ${{ matrix.platform }} \
+            --only-binary numpy --only-binary scipy --only-binary scikit-image \
+            --only-binary pandas --only-binary pillow \
+            -r packaging/requirements-mac.txt
+
+      - name: Record version and repository in the app
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="$(.venv/bin/python -c 'import pipfucci; print(pipfucci.__version__)')"; fi
+          printf 'GITHUB_REPO = "%s"\nBUILD_VERSION = "%s"\n' "$GITHUB_REPOSITORY" "$VERSION" > pipfucci/_build_info.py
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build PIP-FUCCI.app
+        run: .venv/bin/pyinstaller packaging/pip_fucci.spec --noconfirm
+
+      - name: Sign ad hoc (no Apple developer account)
+        run: |
+          codesign --force --deep --sign - dist/PIP-FUCCI.app
+          codesign --verify --deep --strict --verbose=2 dist/PIP-FUCCI.app
+
+      - name: Self-test the built app (demo data, analysis, export, server)
+        run: dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --selftest
+
+      - name: Make the DMG
+        run: |
+          mkdir dmg
+          cp -R dist/PIP-FUCCI.app dmg/
+          ln -s /Applications dmg/Applications
+          cp "packaging/How to open PIP-FUCCI the first time.pdf" dmg/
+          for i in 1 2 3; do
+            hdiutil create -volname "PIP-FUCCI" -srcfolder dmg -ov -format UDZO "PIP-FUCCI-${{ matrix.label }}.dmg" && break
+            sleep 10
+          done
+          test -f "PIP-FUCCI-${{ matrix.label }}.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.label }}
+          path: PIP-FUCCI-${{ matrix.label }}.dmg
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dmg-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.dmg"
+          body: |
+            **Which file?** Apple menu > About This Mac. If it says *Apple M1/M2/M3/M4…* download **PIP-FUCCI-AppleSilicon.dmg**; if it says *Intel*, download **PIP-FUCCI-Intel.dmg**.
+
+            1. Open the DMG and drag **PIP-FUCCI** onto **Applications**.
+            2. The first time only: double-click PIP-FUCCI, click **Done** on the warning, then open **System Settings › Privacy & Security**, scroll down and click **Open Anyway**, enter your password, then **Open**.
+            3. After that it opens like any other app.
+
+            Needs macOS 12 or later.
