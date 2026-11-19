@@ -73,6 +73,10 @@ class AppState:
         self.update_info = None
         self.restart_requested = False
         self.healthy = False
+        self.server = None
+        self.is_child = False  # True when started by "Update now" (backend without a window)
+        self.shell_pid = os.getpid()
+        self.retired = False
 
     # ---------------- recent experiments
     def recent(self) -> list:
@@ -241,6 +245,42 @@ def check_update():
     except Exception:
         STATE.update_info = {"available": False}
     return STATE.update_info
+
+
+def update_now() -> dict:
+    """Start the downloaded version as a backend, hand the window over to it, then retire."""
+    from .updater import (EXE_REL, UPDATER, note_attempt, note_failed, spawn_backend, versions_dir)
+
+    if STATE.progress.get("running"):
+        raise ValueError("Wait for the analysis to finish, then update.")
+    st = UPDATER.status
+    ver = st.get("ready_version")
+    if st.get("state") != "ready" or not ver:
+        raise ValueError("No update is ready yet.")
+    exe = versions_dir() / f"PIP-FUCCI-{ver}.app" / EXE_REL
+    if not exe.is_file():
+        raise ValueError("The downloaded update is missing. It will download again shortly.")
+    ready = versions_dir() / f".ready-{os.getpid()}-{int(time.time() * 1000)}"
+    cmd = [str(exe), "--serve", "--parent-pid", str(STATE.shell_pid), "--ready-file", str(ready)]
+    if STATE.exp is not None:
+        cmd += ["--folder", str(STATE.exp.folder)]
+    note_attempt(ver)
+    try:
+        port = spawn_backend(cmd, ready)
+    except Exception:
+        note_failed(ver)
+        raise
+    UPDATER.stop()
+
+    def retire():
+        STATE.retired = True
+        if STATE.is_child:
+            os._exit(0)
+        if STATE.server is not None:
+            STATE.server.shutdown()
+
+    threading.Timer(15.0, retire).start()
+    return {"url": f"http://127.0.0.1:{port}/", "version": ver}
 
 
 def need_exp():
@@ -431,6 +471,8 @@ class Handler(BaseHTTPRequestHandler):
             if ep == "reveal":
                 reveal(b.get("path") or str(need_exp().results_dir))
                 return self._json({"ok": True})
+            if ep == "update_now":
+                return self._json(update_now())
             if ep == "restart":
                 from .updater import UPDATER
 

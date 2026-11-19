@@ -30,9 +30,13 @@
       <div id="update"></div>
     </div>
   </nav>
-  <main id="main" tabindex="-1"></main>
+  <div class="col">
+    <div id="banner" role="region" aria-label="Update"></div>
+    <main id="main" tabindex="-1"></main>
+  </div>
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
+<div id="overlay" hidden><div class="overlay-box"><div class="spinner" aria-hidden="true"></div><strong id="overlay-title">Updating PIP-FUCCI…</strong><span class="muted small" id="overlay-sub">This takes a few seconds. Your experiment stays open.</span></div></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -163,7 +163,10 @@ function updateProgressUI(p) {
 // ---------------------------------------------------------------- step 1: experiment
 async function chooseFolder() {
   try {
-    const r = await api('pick_folder', {});
+    let r;
+    const shell = window.pywebview && window.pywebview.api && window.pywebview.api.pick_folder;
+    if (shell) r = { path: await window.pywebview.api.pick_folder() };
+    else r = await api('pick_folder', {});
     if (r.path) await openFolder(r.path);
     else if (!S.st.native_dialogs) { const m = $('#manual'); if (m) m.style.display = 'flex'; }
   } catch (e) { fail(e); }
@@ -923,38 +926,65 @@ let rz;
 window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (S.view === 'viewer') drawScatter(); if (S.view === 'cells') drawHeat(); }, 150); });
 
 // ---------------------------------------------------------------- updates
+function analysisRunning() { return !!(S.st && S.st.progress && S.st.progress.running); }
+
+async function updateNow() {
+  const ov = document.getElementById('overlay');
+  ov.hidden = false;
+  stopPlay();
+  try {
+    const r = await api('update_now', {});
+    $('#overlay-title').textContent = `Updating to version ${r.version}…`;
+    location.replace(r.url + '#view=' + S.view);
+  } catch (e) {
+    ov.hidden = true;
+    fail(e);
+  }
+}
+
 async function refreshUpdate() {
   let u;
   try { u = await api('update'); } catch (e) { return; }
   const box = document.getElementById('update');
+  const banner = document.getElementById('banner');
   const wrap = (inner) => `<div class="small" style="display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:1px solid #23282D">${inner}</div>`;
-  if (u.just_updated) toast(`PIP-FUCCI updated to version ${u.just_updated}.`);
+  if (u.just_updated) toast(`PIP-FUCCI is now version ${u.just_updated}.`);
   if (!u.enabled) {  // running from source: just say a new release exists
     box.innerHTML = u.available ? wrap(`<span>Version ${esc(u.latest)} is available.</span><button class="btn sm" id="upd">Download update</button>`) : '';
     const b = $('#upd'); if (b) b.onclick = () => api('open_url', { url: u.url }).catch(fail);
-    return;
-  }
-  if (u.state === 'downloading' || u.state === 'installing') {
+    banner.innerHTML = '';
+  } else if (u.state === 'downloading' || u.state === 'installing') {
     box.innerHTML = wrap(`<span>Downloading update ${esc(u.latest || '')}…</span><div class="bar"><div style="width:${Math.round((u.progress || 0) * 100)}%"></div></div>`);
+    banner.innerHTML = '';
   } else if (u.state === 'ready') {
-    const busy = S.st && S.st.progress && S.st.progress.running;
-    box.innerHTML = wrap(`<span>Update ${esc(u.ready_version)} is ready. It installs the next time PIP-FUCCI opens.</span>
-      <button class="btn sm" id="restart" ${busy ? 'disabled title="Wait for the analysis to finish"' : ''}>Restart now</button>`);
-    $('#restart').onclick = async () => {
-      try { await api('restart', {}); box.innerHTML = wrap('<span>Restarting…</span>'); } catch (e) { fail(e); }
-    };
+    const busy = analysisRunning();
+    const note = busy ? 'You can update when the analysis finishes.' : 'Takes a few seconds; your experiment stays open.';
+    box.innerHTML = wrap(`<span>Version ${esc(u.ready_version)} is ready.</span><button class="btn sm" id="upd-side" ${busy ? 'disabled' : ''}>Update now</button>`);
+    if (S.bannerHidden !== u.ready_version) {
+      banner.innerHTML = `<div class="banner"><div class="txt">${ICON.info}<span><strong>A new version of PIP-FUCCI is ready.</strong> <span class="muted">${note}</span></span></div>
+        <div style="display:flex;gap:8px"><button class="btn sm" id="upd-later">Later</button><button class="btn sm primary" id="upd-now" ${busy ? 'disabled' : ''} style="min-height:32px">Update now</button></div></div>`;
+      $('#upd-now').onclick = updateNow;
+      $('#upd-later').onclick = () => { S.bannerHidden = u.ready_version; banner.innerHTML = ''; };
+    }
+    $('#upd-side').onclick = updateNow;
   } else {
     box.innerHTML = '';
+    banner.innerHTML = '';
   }
-  const fast = u.state === 'downloading' || u.state === 'installing' || u.state === 'checking';
+  const fast = ['downloading', 'installing', 'checking'].includes(u.state) || (u.state === 'ready' && analysisRunning());
   clearTimeout(S.updTimer);
-  S.updTimer = setTimeout(refreshUpdate, fast ? 1500 : 30000);
+  S.updTimer = setTimeout(refreshUpdate, fast ? 1500 : 20000);
 }
 
 // ---------------------------------------------------------------- start
 (async function start() {
   try {
+    const m = /view=(\w+)/.exec(location.hash);  // coming back after "Update now"
+    if (m && ['experiment', 'viewer', 'population', 'cells'].includes(m[1])) S.view = m[1];
+    history.replaceState(null, '', location.pathname);
     await refreshState();
+    if (S.view !== 'experiment' && !hasResults()) S.view = 'experiment';
+    updateSteps();
     render();
     refreshUpdate();
   } catch (e) { fail(e); }

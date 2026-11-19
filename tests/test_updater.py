@@ -138,3 +138,35 @@ def test_up_to_date_and_cleanup(env, monkeypatch):
     u.check_and_download()
     assert u.status["state"] == "up_to_date"
     assert up.installed_versions() == []
+
+
+def test_running_copies_are_never_cleaned_up(env, monkeypatch):
+    vd = up.versions_dir()
+    fake_bundle(vd, "0.1.6", "PIP-FUCCI-0.1.6.app")
+    fake_bundle(vd, "0.1.9", "PIP-FUCCI-0.1.9.app")
+    (vd / f".inuse-0.1.6-{up.os.getpid()}").write_text("")  # a window still runs 0.1.6
+    (vd / ".inuse-0.1.9-999999").write_text("")  # stale marker from a dead process
+    up.Updater().cleanup()
+    assert sorted(v for v, _ in up.installed_versions()) == ["0.1.6", "0.1.9"]
+    assert not (vd / ".inuse-0.1.9-999999").exists()
+
+
+def test_backend_starts_and_reports_port(tmp_path, monkeypatch):
+    """The real --serve mode (as started by "Update now") comes up and answers."""
+    import urllib.request
+    from pathlib import Path
+
+    monkeypatch.setenv("PIPFUCCI_SUPPORT_DIR", str(tmp_path / "support"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = Path(__file__).resolve().parents[1]
+    ready = tmp_path / "ready"
+    code = f"import sys; sys.path.insert(0, {str(root)!r}); from pipfucci.app import main; sys.exit(main(sys.argv[1:]))"
+    cmd = [sys.executable, "-c", code, "--serve", "--parent-pid", str(up.os.getpid()), "--ready-file", str(ready)]
+    port = up.spawn_backend(cmd, ready, timeout=60)
+    st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=10).read())
+    assert st["app"] == "PIP-FUCCI"
+
+
+def test_backend_that_dies_is_reported(tmp_path):
+    with pytest.raises(RuntimeError, match="stopped"):
+        up.spawn_backend([sys.executable, "-c", "raise SystemExit(3)"], tmp_path / "ready", timeout=20)

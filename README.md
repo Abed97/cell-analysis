@@ -18,14 +18,19 @@ no sign-in, no internet needed, and images never leave the computer.
 The app isn't registered with Apple (that needs a paid developer account), which is why macOS asks
 once. Needs macOS 12 or later.
 
-### Updates are automatic
+### Updates
 
-Every new version is downloaded in the background while the app is open, and the app switches to
-it the next time it opens (or right away with **Restart now** in the sidebar). There's nothing to
-click and no password to type. The copy in Applications is never touched: new versions live in
-`~/Library/Application Support/PIP-FUCCI/versions/`, and the installed app hands over to the
-newest one at launch. A version that fails to start twice is skipped automatically. Results are
-never affected; they live next to the images.
+New versions download in the background while the app is open (it checks every 30 minutes).
+When one is ready, a banner says so with an **Update now** button: the window stays open, shows
+"Updating…" for a few seconds, and comes back on the same experiment and screen, running the new
+version. If she ignores it, the app opens on the new version next time anyway. The button is
+disabled while an analysis is running.
+
+No password, no "Open Anyway" again: the copy in Applications is never touched. New versions
+live in `~/Library/Application Support/PIP-FUCCI/versions/`; the installed app hands over to the
+newest one at launch, and **Update now** starts the new version in the background and moves the
+window to it. A version that fails to start twice is skipped automatically. Results are never
+affected; they live next to the images.
 
 ## Using it
 
@@ -79,8 +84,8 @@ the numbers.
 
 Push to `main`. GitHub Actions (`.github/workflows/build-mac.yml`) runs the tests, builds the app
 for Apple silicon and Intel on GitHub's Macs, signs it ad hoc, self-tests the built app and the
-update handoff, and publishes a release numbered `<major>.<minor>.<build>` (for example
-`0.1.14`). Installed apps pick it up within a few hours, or at their next launch. Pushes that
+update handover, and publishes a release numbered `<major>.<minor>.<build>` (for example
+`0.1.14`). Open apps show the **Update now** banner within about 30 minutes. Pushes that
 only change `.md` files don't make a release. The 10 newest releases are kept.
 
 To start a new series (for example 0.2.x), change `__version__` in `pipfucci/__init__.py`.

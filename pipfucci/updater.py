@@ -30,7 +30,7 @@ from pathlib import Path
 from . import APP_NAME, GITHUB_REPO, __version__
 
 EXE_REL = Path("Contents") / "MacOS" / APP_NAME
-CHECK_EVERY_S = 3 * 3600
+CHECK_EVERY_S = 30 * 60
 _NAME = re.compile(r"^PIP-FUCCI-(\d+(?:\.\d+)*)\.app$")
 
 
@@ -99,6 +99,75 @@ def running_bundle() -> Path | None:
         if parent.suffix == ".app":
             return parent
     return None
+
+
+def register_running() -> None:
+    """Mark the running copy as in use so another process never deletes it."""
+    rb = running_bundle()
+    if rb is None or rb.parent.resolve() != versions_dir().resolve():
+        return
+    m = _NAME.match(rb.name)
+    if m:
+        (versions_dir() / f".inuse-{m.group(1)}-{os.getpid()}").write_text("")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return True
+
+
+def in_use_versions() -> set:
+    used = set()
+    for p in versions_dir().glob(".inuse-*"):
+        try:
+            _, ver, pid = p.name.split("-", 2)
+            if _pid_alive(int(pid)):
+                used.add(ver)
+            else:
+                p.unlink(missing_ok=True)
+        except Exception:
+            p.unlink(missing_ok=True)
+    return used
+
+
+def note_attempt(ver: str) -> None:
+    st = load_state()
+    a = st.setdefault("attempts", {})
+    a[ver] = a.get(ver, 0) + 1
+    save_state(st)
+
+
+def note_failed(ver: str) -> None:
+    st = load_state()
+    if st.setdefault("attempts", {}).get(ver, 0) >= 2:
+        st["bad"] = sorted(set(st.get("bad", [])) | {ver}, key=vt)
+    save_state(st)
+
+
+def spawn_backend(cmd: list[str], ready_file: Path, timeout: float = 150.0) -> int:
+    """Start a backend (``--serve``) and wait until it reports its port. Raises on failure."""
+    import subprocess as sp
+
+    ready_file.unlink(missing_ok=True)
+    env = dict(os.environ, PIPFUCCI_LAUNCHED="1")
+    proc = sp.Popen(cmd, env=env, stdin=sp.DEVNULL, stdout=sp.DEVNULL, stderr=sp.DEVNULL, start_new_session=True)
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if ready_file.exists():
+            txt = ready_file.read_text().strip()
+            if txt.isdigit():
+                ready_file.unlink(missing_ok=True)
+                return int(txt)
+        if proc.poll() is not None:
+            raise RuntimeError(f"the new version stopped while starting (code {proc.returncode})")
+        time.sleep(0.25)
+    proc.kill()
+    raise RuntimeError("the new version took too long to start")
 
 
 # ------------------------------------------------------------------ launch handoff
@@ -191,6 +260,10 @@ class Updater:
         self.status = {"enabled": enabled(), "state": "idle", "current": __version__, "latest": None,
                        "ready_version": None, "progress": 0.0, "message": None, "just_updated": None}
         self._thread = None
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -210,14 +283,33 @@ class Updater:
 
     def _loop(self, delay):
         time.sleep(delay)
-        while True:
+        while not self.stopped:
             try:
                 self.check_and_download()
             except Exception as e:  # noqa: BLE001 - never let updates break the app
                 self._set(state="error", message=str(e))
-            time.sleep(CHECK_EVERY_S)
+            for _ in range(int(CHECK_EVERY_S)):
+                if self.stopped:
+                    return
+                time.sleep(1)
 
     def check_and_download(self) -> None:
+        """One check, with a lock so two running copies never download at the same time."""
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover
+            return self._check_and_download()
+        with open(versions_dir() / ".lock", "w") as lk:
+            try:
+                fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return None
+            try:
+                return self._check_and_download()
+            finally:
+                fcntl.flock(lk, fcntl.LOCK_UN)
+
+    def _check_and_download(self) -> None:
         self._set(state="checking", message=None)
         with _get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest") as r:
             rel = json.loads(r.read().decode())
@@ -287,7 +379,10 @@ class Updater:
         rb = running_bundle()
         if rb:
             keep.add(rb.resolve())
-        for _, p in vs:
+        used = in_use_versions()
+        for v, p in vs:
+            if v in used:
+                continue
             if p.resolve() not in keep:
                 shutil.rmtree(p, ignore_errors=True)
         for p in versions_dir().glob(".extract-*"):
