@@ -143,6 +143,7 @@ def experiment_state(exp) -> dict:
         "results_dir": str(exp.results_dir),
         "run": exp.meta.get("run", {}).get("finished") if exp.has_results else None,
         "floor": exp.meta.get("floor"),
+        "old_format": bool(exp.has_results and "interp" not in exp.cells.columns),
         "linked": linked_info(exp),
         "saved_at": _saved_at(exp),
     }

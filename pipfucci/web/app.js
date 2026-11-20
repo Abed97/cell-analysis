@@ -227,6 +227,9 @@ function runCard(e) {
     } else if (e.stale === 'tracking') {
       msg = `<strong>Tracking settings changed</strong><span class="muted"> · updating tracks takes seconds; segmentation is kept.</span>`;
       btns = `<button class="btn" id="btn-run">Re-run everything</button><button class="btn primary" id="btn-retrack">Update tracking</button>`;
+    } else if (e.old_format) {
+      msg = `<strong>Analysed with an earlier version</strong><span class="muted"> · re-run to get background removal, tracking through colourless cells and confluence of all cells. Plate map, gates and settings are kept.</span>`;
+      btns = `<button class="btn" id="btn-next">Look at current results</button><button class="btn primary" id="btn-run">Re-run analysis</button>`;
     } else {
       msg = `<strong>Analysed</strong><span class="muted"> · ${esc((e.run || '').replace('T', ' '))} · ${e.n_cells.toLocaleString()} detections in ${e.n_tracks.toLocaleString()} tracks.</span>`;
       btns = `<button class="btn" id="btn-run">Re-run analysis</button><button class="btn primary" id="btn-next">Continue to segmentation ${ICON.arrow}</button>`;
