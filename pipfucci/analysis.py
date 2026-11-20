@@ -60,21 +60,37 @@ def well_series(exp: Experiment) -> dict:
                 counts[f, p] = v
         total = counts.sum(axis=1)
         conf = np.full(n_frames, np.nan)
-        confs = []
+        col_n = np.full(n_frames, np.nan)
+        col_a = np.full(n_frames, np.nan)
+        confs, ns, areas = [], [], []
         for m in exp.meta.get("movies", {}).values():
             if m["well"] == well:
-                arr = np.full(n_frames, np.nan)
-                for f, v in zip(m["frames"], m["confluence"]):
-                    if v is not None and 0 <= f < n_frames:
-                        arr[f] = v
-                confs.append(arr)
+                arrs = [np.full(n_frames, np.nan) for _ in range(3)]
+                for f, v, n, a in zip(m["frames"], m["confluence"], m.get("colonies") or [None] * len(m["frames"]),
+                                      m.get("colony_area") or [None] * len(m["frames"])):
+                    if 0 <= f < n_frames:
+                        arrs[0][f] = np.nan if v is None else v
+                        arrs[1][f] = np.nan if n is None else n
+                        arrs[2][f] = np.nan if a is None else a
+                confs.append(arrs[0])
+                ns.append(arrs[1])
+                areas.append(arrs[2])
         if confs:
-            with np.errstate(all="ignore"):
+            import warnings
+
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
                 conf = np.nanmean(np.vstack(confs), axis=0) * 100
+                n_st, a_st = np.vstack(ns), np.vstack(areas)
+                col_n = np.nanmean(n_st, axis=0)  # colonies per image (field)
+                tot = np.nansum(np.where(np.isfinite(a_st) & np.isfinite(n_st), a_st * n_st, 0), axis=0)
+                cnt = np.nansum(np.where(np.isfinite(a_st), n_st, 0), axis=0)
+                col_a = np.where(cnt > 0, tot / np.maximum(cnt, 1), np.nan)  # mean over all colonies
         with np.errstate(divide="ignore", invalid="ignore"):
             frac = counts / total[:, None] * 100
             norm = total / total[0] if total[0] > 0 else np.full(n_frames, np.nan)
-        out[well] = {"counts": counts, "total": total, "frac": frac, "count_norm": norm, "confluence": conf}
+        out[well] = {"counts": counts, "total": total, "frac": frac, "count_norm": norm, "confluence": conf,
+                     "colonies": col_n, "colony_area": col_a}
     return out
 
 
@@ -106,7 +122,7 @@ def population(exp: Experiment) -> dict:
         for i, p in enumerate(CALLS):
             m, s = _mean_sem(np.vstack([ws[w]["frac"][:, i] for w in wells]))
             entry[p] = {"mean": _clean(m), "sem": _clean(s)}
-        for key in ("count_norm", "confluence", "total"):
+        for key in ("count_norm", "confluence", "total", "colonies", "colony_area"):
             m, s = _mean_sem(np.vstack([ws[w][key] for w in wells]))
             entry[key] = {"mean": _clean(m), "sem": _clean(s)}
         conds.append(entry)
@@ -382,9 +398,13 @@ def detection_stats(exp: Experiment, well: str, field: int, frame: int) -> dict:
     sub = c[(c["well"] == well) & (c["field"] == field) & (c["frame"] == frame)]
     n_interp = int(sub["interp"].sum()) if "interp" in sub else 0
     sub = sub[~sub["interp"]] if "interp" in sub else sub
-    conf = None
+    conf = ncol = acol = None
     m = exp.meta.get("movies", {}).get(f"{well}_{field}")
     if m and frame in m["frames"]:
-        conf = m["confluence"][m["frames"].index(frame)]
+        i = m["frames"].index(frame)
+        conf = m["confluence"][i]
+        ncol = (m.get("colonies") or [None] * (i + 1))[i]
+        acol = (m.get("colony_area") or [None] * (i + 1))[i]
     return {"detected": int(len(sub)), "colourless": n_interp,
-            "confluence": None if conf is None else round(conf * 100, 1)}
+            "confluence": None if conf is None else round(conf * 100, 1),
+            "colonies": ncol, "colony_area": None if acol is None else round(acol)}

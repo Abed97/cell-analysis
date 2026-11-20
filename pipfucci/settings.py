@@ -19,6 +19,7 @@ class Settings:
     max_speed_um_h: float = 30.0
     max_gap_h: float = 2.0
     colourless_h: float = 12.0  # follow cells through stretches with neither reporter on, up to this long
+    min_object_um2: float = 50.0  # confluence mask: objects smaller than this are debris, not cells
     bg_radius_um: float | None = None  # top-hat background radius; None = one nucleus diameter
     smoothing_h: float = 1.0
     sensitivity: float = 0.5  # segmentation: 0 = strict, 1 = picks up dim cells
@@ -95,6 +96,8 @@ class Settings:
             "colourless_frames": self.colourless_frames,
             "bg_radius_px": round(self.bg_radius_px, 1),
             "bg_radius_um": round(self.bg_radius_px * self.pixel_um, 1),
+            "min_object_px": round(self.min_object_um2 / self.pixel_um ** 2),
+            "min_object_diam_um": round(2 * math.sqrt(self.min_object_um2 / math.pi), 1),
             "smoothing_frames": self.smoothing_frames,
             "precision_min": self.interval_min,
             "division_rule": (
@@ -147,6 +150,7 @@ class Settings:
         pos("max_speed_um_h", 0.1, 20.0)
         pos("max_gap_h", 0.0, 2.0)
         pos("colourless_h", 0.0, 12.0)
+        pos("min_object_um2", 0.0, 50.0)
         if self.bg_radius_um is not None:
             try:
                 v = float(self.bg_radius_um)

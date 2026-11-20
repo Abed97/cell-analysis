@@ -173,9 +173,9 @@ def test_backend_that_dies_is_reported(tmp_path):
 
 
 def test_prefs_roundtrip_and_auto_install_off(env, monkeypatch):
-    assert up.load_prefs() == {"auto_check": True, "auto_install": True, "workers": 0}
-    p = up.save_prefs({"auto_install": False, "workers": "3", "bogus": 1})
-    assert p == {"auto_check": True, "auto_install": False, "workers": 3}
+    assert up.load_prefs() == {"auto_check": True, "auto_install": True, "workers": 0, "notify": True}
+    p = up.save_prefs({"auto_install": False, "workers": "3", "bogus": 1, "notify": 0})
+    assert p == {"auto_check": True, "auto_install": False, "workers": 3, "notify": False}
     # with automatic installs off, launching never switches to a downloaded version
     fake_bundle(up.versions_dir(), "0.1.9", name="PIP-FUCCI-0.1.9.app")
     called = []

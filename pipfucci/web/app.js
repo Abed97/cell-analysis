@@ -116,24 +116,61 @@ function needResults() {
 }
 
 // ---------------------------------------------------------------- progress
-function startPolling() {
-  if (S.polling) return;
+// Progress is polled until the job ends. A failed request (the Mac slept, the page was
+// suspended in the background) never stops the polling; it just tries again.
+function startPolling(force = false) {
+  if (S.polling && !force) return;
   S.polling = true;
+  const gen = S.pollGen = (S.pollGen || 0) + 1;  // a restarted poller retires the old one
+  let misses = 0;
   const tick = async () => {
-    try {
-      const p = await api('progress');
-      S.st.progress = p;
-      updateProgressUI(p);
-      if (p.running) { setTimeout(tick, 500); return; }
-      S.polling = false;
-      await refreshState();
-      if (p.error) toast('Analysis failed: ' + p.error, { bad: true });
-      else if (p.cancelled) toast('Cancelled.');
-      else if (p.stage === 'Done') toast('Analysis finished.', { action: hasResults() ? { label: 'View results', fn: () => setView('viewer') } : null });
-      if (S.view === 'experiment') render();
-    } catch (e) { S.polling = false; fail(e); }
+    if (gen !== S.pollGen) return;
+    let p;
+    try { p = await api('progress'); misses = 0; } catch (e) {
+      misses++;
+      setTimeout(tick, Math.min(5000, 500 * 2 ** Math.min(misses, 4)));
+      return;
+    }
+    if (gen !== S.pollGen) return;
+    S.st.progress = p;
+    S.lastProgressAt = Date.now();
+    updateProgressUI(p);
+    renderJobPill(p);
+    if (p.running) { setTimeout(tick, 700); return; }
+    S.polling = false;
+    try { await refreshState(); } catch (e) { /* next poll catches up */ }
+    const what = p.job === 'retrack' ? 'Re-tracking' : p.job === 'measure' ? 'Confluence' : 'Analysis';
+    if (p.error) toast(`${what} failed: ` + p.error, { bad: true });
+    else if (p.cancelled) toast('Cancelled.');
+    else if (p.stage === 'Done' && p.job === 'measure') toast('Confluence and colonies updated.');
+    else if (p.stage === 'Done' && p.job !== 'demo') toast(`${what} finished.`, { action: hasResults() ? { label: 'View results', fn: () => setView('viewer') } : null });
+    if (p.job === 'measure') { S.v.ver++; if (S.view !== 'experiment') render(); }
+    if (S.view === 'experiment') render();
   };
   tick();
+}
+
+// safety net: if anything ever stops the polling while a job runs, pick it up again
+setInterval(async () => {
+  if (!S.st) return;
+  if (S.polling) {  // a poller that has gone quiet for 15 s is replaced
+    if (Date.now() - (S.lastProgressAt || Date.now()) > 15000) startPolling(true);
+    return;
+  }
+  try { const p = await api('progress'); if (p.running) startPolling(); else renderJobPill(p); } catch (e) { /* offline */ }
+  return;
+}, 5000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && S.st && S.st.progress && S.st.progress.running && Date.now() - (S.lastProgressAt || 0) > 3000) startPolling(true);
+});
+
+function renderJobPill(p) {
+  const el = document.getElementById('job-pill');
+  if (!el) return;
+  if (!p || !p.running) { el.innerHTML = ''; return; }
+  const pct = Math.round((p.fraction || 0) * 100);
+  el.innerHTML = `<button class="pill" id="job-btn" style="cursor:pointer" title="${esc(p.stage || 'Working')}: ${pct}%. Click to see details."><span class="spin-dot" aria-hidden="true"></span>${esc(p.stage || 'Working')} <span class="mono">${pct}%</span><span class="minibar"><div style="width:${pct}%"></div></span></button>`;
+  $('#job-btn').onclick = () => setView('experiment');
 }
 
 function fmtEta(s) {
@@ -146,9 +183,10 @@ function fmtEta(s) {
 
 function progressHTML(p) {
   const pct = Math.round((p.fraction || 0) * 100);
-  const frames = p.total ? `${p.done || 0} of ${p.total} frames` : '';
+  const frames = p.total ? `${p.done || 0} of ${p.total} ${p.unit || 'frames'}` : '';
   return `<div class="progress" id="prog">
     <div class="runbar"><strong id="prog-stage">${esc(p.stage || 'Working')}…</strong><span class="mono small muted" id="prog-txt">${pct}% · ${esc(frames)} ${esc(fmtEta(p.eta_s))}</span></div>
+    ${p.workers > 1 ? `<span class="small muted">Using ${p.workers} processor cores. You can switch to other apps; the analysis keeps going and the Dock icon shows the progress.</span>` : ''}
     <div class="bar"><div id="prog-bar" style="width:${pct}%"></div></div>
     <div><button class="btn sm" id="btn-cancel">Cancel</button></div></div>`;
 }
@@ -159,7 +197,7 @@ function updateProgressUI(p) {
     const pct = Math.round((p.fraction || 0) * 100);
     bar.style.width = pct + '%';
     $('#prog-stage').textContent = (p.stage || 'Working') + '…';
-    $('#prog-txt').textContent = `${pct}% · ${p.total ? `${p.done || 0} of ${p.total} frames` : ''} ${fmtEta(p.eta_s)}`;
+    $('#prog-txt').textContent = `${pct}% · ${p.total ? `${p.done || 0} of ${p.total} ${p.unit || 'frames'}` : ''} ${fmtEta(p.eta_s)}`;
   } else if (p.running && S.view === 'experiment') {
     render();
   }
@@ -318,6 +356,7 @@ function settingsCard(e) {
     ${setRow('interval_min', 'Frame interval', 'Link distance, gap closing, smoothing, division logic', s.interval_min, 'min', 1, `1 h smoothing = ${d.smoothing_frames} frame${d.smoothing_frames === 1 ? '' : 's'} · durations ± ${num(s.interval_min)} min`)}
     ${setRow('pixel_um', 'Pixel size', '0.62 µm/px is the Incucyte at 20X', s.pixel_um, 'µm/px', 0.01, `1 µm = ${num(1 / s.pixel_um, 2)} px`)}
     ${setRow('nucleus_um', 'Typical nucleus diameter', 'Segmentation diameter', s.nucleus_um, 'µm', 0.5, `${num(d.nucleus_px)} px across`)}
+    ${setRow('min_object_um2', 'Smallest object counted as a cell', 'Confluence and colonies: anything smaller in the phase-contrast mask is treated as debris and ignored. Changing it only re-measures, it does not re-run the analysis.', s.min_object_um2, 'µm²', 10, `≈ ${num(d.min_object_diam_um)} µm across · ${d.min_object_px} px`)}
     ${setRow('bg_radius_um', 'Background removal size', 'Green and red haze broader than this (autofluorescence, uneven medium) is subtracted before nuclei are found: a top-hat filter. Empty = one nucleus diameter.', s.bg_radius_um == null ? '' : s.bg_radius_um, 'µm', 1, `${num(d.bg_radius_um)} µm = ${num(d.bg_radius_px)} px${s.bg_radius_um == null ? ' (automatic)' : ''}`, 'auto')}
     ${setRow('max_speed_um_h', 'Max cell speed', 'Search radius = speed × interval ÷ pixel size', s.max_speed_um_h, 'µm/h', 1, `${num(d.search_radius_px)} px search radius per frame`)}
     ${setRow('max_gap_h', 'Max gap', 'Joins a track across frames where the cell was missed', s.max_gap_h, 'h', 0.5, `Closes gaps of up to ${d.max_gap_frames} frame${d.max_gap_frames === 1 ? '' : 's'}`)}
@@ -343,7 +382,10 @@ function renderExperiment() {
     + `<p class="small muted">Settings, software versions and thresholds are saved with every output, so any figure can be traced back to how it was made.</p>`;
 
   const save = async (patch) => {
-    try { const r = await api('settings', patch); S.st = r.state; markSaved(); render(); } catch (err) { fail(err); }
+    try {
+      const r = await api('settings', patch); S.st = r.state; markSaved(); render();
+      if (r.result && r.result.action === 'remeasure') startPolling();
+    } catch (err) { fail(err); }
   };
   $('#exp-name').onchange = (ev) => save({ experiment_name: ev.target.value });
   $('#btn-other').onclick = chooseFolder;
@@ -469,7 +511,11 @@ function renderViewer() {
           <div class="stats"><div class="stat"><span class="small muted">Nuclei here</span><span class="v" id="st-det">–</span></div>
             <div class="stat" title="Cells with neither reporter on, followed on phase contrast"><span class="small muted">Colourless</span><span class="v" id="st-cl">–</span></div>
             <div class="stat" title="Area covered by all cells, from phase contrast"><span class="small muted">Confluence</span><span class="v" id="st-conf">–</span></div>
+            <div class="stat" title="Separate objects in the confluence mask (touching cells form one colony)"><span class="small muted">Colonies</span><span class="v" id="st-col">–</span></div>
+            <div class="stat"><span class="small muted">Mean colony area</span><span class="v" id="st-cola" style="font-size:18px">–</span></div>
             <div class="stat"><span class="small muted">Tracks (all)</span><span class="v">${e.n_tracks.toLocaleString()}</span></div></div>
+          <div class="setrow" style="border-top:1px solid #23282D;padding-top:12px"><div class="lbl"><label for="v-minobj">Smallest object counted</label><span>Smaller specks in the confluence mask are debris: drawn with an <span style="color:#FF8C26">orange outline</span> and left out of confluence and colonies.</span></div>
+            <div class="unit-input" style="flex:0 0 140px"><input id="v-minobj" type="number" min="0" step="10" value="${esc(s.min_object_um2)}"><span>µm²</span></div></div>
           <p class="small muted">Confluence is the area covered by every cell in phase contrast, coloured or not; turn on “Confluence area” to see it. Colourless cells (neither reporter on, mostly right after division) are followed on phase contrast and drawn as dashed circles under “Cell numbers”.</p>
           <div><div class="kv"><span class="muted">Method</span><span>${s.method === 'cellpose' ? 'Cellpose' : 'Built-in'} on red + green</span></div>
           <div class="kv"><span class="muted">Background</span><span class="mono">top-hat, ${num(e.derived.bg_radius_um)} µm</span></div>
@@ -504,6 +550,17 @@ function renderViewer() {
   img.onload = () => { if (S.v.playing) S.v.timer = setTimeout(advance, Math.max(0, 1000 / S.v.fps - (performance.now() - S.v.t0))); };
   img.onerror = () => { if (S.v.playing) S.v.timer = setTimeout(advance, 300); };
   $('#ids').onclick = pickCell;
+  $('#v-minobj').onchange = async (ev) => {
+    const v = parseFloat(ev.target.value);
+    if (!isFinite(v) || v < 0) return;
+    try {
+      const r = await api('settings', { min_object_um2: v });
+      S.st = r.state; markSaved();
+      if (!S.v.layers.has('confluence')) { S.v.layers.add('confluence'); const c = $('input[data-layer=confluence]'); if (c) c.checked = true; }
+      S.v.ver++; loadFrame();
+      if (r.result.action === 'remeasure') startPolling();
+    } catch (err) { fail(err); }
+  };
   setupGates();
   loadFrame();
   loadScatter();
@@ -570,7 +627,11 @@ function loadFrame() {
   if (!S.v.playing) {
     api(`stats?well=${S.v.well}&field=${S.v.field}&frame=${f}`).then((st) => {
       const d = $('#st-det');
-      if (d) { d.textContent = st.detected; $('#st-cl').textContent = st.colourless; $('#st-conf').textContent = st.confluence == null ? '–' : st.confluence + '%'; }
+      if (d) {
+        d.textContent = st.detected; $('#st-cl').textContent = st.colourless; $('#st-conf').textContent = st.confluence == null ? '–' : st.confluence + '%';
+        $('#st-col').textContent = st.colonies == null ? '–' : st.colonies;
+        $('#st-cola').textContent = st.colony_area == null ? '–' : `${Math.round(st.colony_area).toLocaleString()} µm²`;
+      }
     }).catch(() => {});
   }
 }
@@ -818,6 +879,11 @@ async function renderPopulation() {
     + (linked.length ? `<div class="info">${ICON.info}<span>Includes ${linked.length} other experiment${linked.length === 1 ? '' : 's'} (${linked.map((l) => esc(l.name)).join(', ')}); conditions with the same name are pooled, wells are the replicates. <button class="link" id="go-fig">Change on the Figures page</button></span></div>` : '')
     + `<section class="card" aria-labelledby="frac-h"><div class="card-head"><div><h2 id="frac-h">Phase fractions over time</h2><p>Each well is summarised first; bands are the SEM across wells. Phase calls are smoothed per track; Colourless = neither reporter on (mostly just after division).</p></div></div>
        <div class="grid4">${panels}</div></section>
+     <section class="card" aria-labelledby="col-h"><div class="card-head"><div><h2 id="col-h">Colonies</h2><p>From the confluence mask (phase contrast, every cell): touching cells form one colony, objects smaller than ${num(S.st.experiment.settings.min_object_um2)} µm² are ignored as debris (change it in step 2). Mean ± SEM across wells.</p></div></div>
+       <div class="grid2">
+         <figure style="margin:0;display:flex;flex-direction:column;gap:8px"><figcaption style="font-weight:600">Colony number <span class="small muted" style="font-weight:400">per image</span></figcaption>${colonyChart(d, 'colonies')}</figure>
+         <figure style="margin:0;display:flex;flex-direction:column;gap:8px"><figcaption style="font-weight:600">Average colony area <span class="small muted" style="font-weight:400">µm²</span></figcaption>${colonyChart(d, 'colony_area')}</figure>
+       </div></section>
      <div class="grid2" style="align-items:stretch">
        <section class="card" aria-labelledby="cnt-h"><div class="card-head"><div><h2 id="cnt-h">Growth</h2><p id="cnt-sub"></p></div>
          <div class="seg" role="group" aria-label="Metric">${metrics.map(([k, n]) => `<button type="button" data-metric="${k}" aria-pressed="${S.pop.metric === k}">${n}</button>`).join('')}</div></div>
@@ -852,6 +918,25 @@ function drawCount() {
   else { ymax = Math.min(100, Math.max(10, Math.ceil(max / 10) * 10)); yticks = [0, ymax / 4, ymax / 2, 3 * ymax / 4, ymax].map((v) => Math.round(v)); fmt = (v) => v + '%'; sub = 'Phase-contrast confluence, mean of fields per well.'; }
   $('#cnt-sub').textContent = sub;
   $('#cnt-chart').innerHTML = lineChart({ w: 520, h: 300, hours: d.hours, series: d.conditions.map((c) => ({ color: c.color, dashed: c.dashed, mean: c[m].mean, sem: c[m].sem })), ymin: 0, ymax, yticks, yfmt: fmt, refY: ref, ylabel: sub });
+}
+
+function niceTicks(max, n = 4) {
+  const raw = Math.max(max, 1e-9) / n;
+  const p = 10 ** Math.floor(Math.log10(raw));
+  const st = [1, 2, 2.5, 5, 10].map((m) => m * p).find((v) => v >= raw);
+  const ymax = Math.max(st, Math.ceil(max / st - 1e-9) * st);
+  const t = []; for (let v = 0; v <= ymax + 1e-9; v += st) t.push(+v.toFixed(6));
+  return { ymax, ticks: t };
+}
+
+function colonyChart(d, key) {
+  const conds = d.conditions.filter((c) => c[key]);
+  let max = 0;
+  conds.forEach((c) => c[key].mean.forEach((v, i) => { if (v != null) max = Math.max(max, v + (c[key].sem[i] || 0)); }));
+  if (!max) return '<p class="muted small">No colony measurements yet. Re-run the analysis (analyses made before this version have none).</p>';
+  const { ymax, ticks } = niceTicks(max);
+  const fmt = key === 'colony_area' ? (v) => (v >= 10000 ? (v / 1000).toFixed(0) + 'k' : v >= 1000 ? (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(v)) : (v) => String(v);
+  return lineChart({ w: 520, h: 280, hours: d.hours, series: conds.map((c) => ({ color: c.color, dashed: c.dashed, mean: c[key].mean, sem: c[key].sem })), ymin: 0, ymax, yticks: ticks, yfmt: fmt, ylabel: key === 'colonies' ? 'Colonies per image' : 'Mean colony area (µm²)' });
 }
 
 async function drawSmallScatters(tps) {
@@ -1300,6 +1385,48 @@ function figFractions(d, conds) {
   return s + '</svg>';
 }
 
+function figColonies(pop, conds) {
+  const panels = [['colonies', 'Colony number', 'Colonies per image'], ['colony_area', 'Average colony area', 'Mean colony area (µm²)']];
+  const pw = 280, ph = 200, gap = 70, l = 66, b = 48;
+  const byId = Object.fromEntries(pop.conditions.map((c) => [c.id, c]));
+  const rows = conds.filter((c) => byId[c.id] && byId[c.id].colonies);
+  const t = 40 + rows.length * 16;
+  const W = l + panels.length * pw + (panels.length - 1) * gap + 16, H = t + ph + b;
+  const hours = pop.hours, xmax = hours[hours.length - 1] || 1;
+  let s = svgOpen(W, H, 'Colonies over time');
+  panels.forEach(([k, title, ylab], pi) => {
+    const x0 = l + pi * (pw + gap);
+    let mx = 0;
+    rows.forEach((c) => byId[c.id][k].mean.forEach((v, j) => { if (v != null) mx = Math.max(mx, v + (byId[c.id][k].sem[j] || 0)); }));
+    const { ymax, ticks } = niceTicks(mx || 1);
+    const sx = (h) => x0 + h / xmax * pw, sy = (v) => t + ph - Math.min(v, ymax) / ymax * ph;
+    const fmt = (v) => (k === 'colony_area' && v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + 'k' : String(v));
+    s += yAxis(x0, t, t + ph, ticks, sy, fmt) + xAxis(t + ph, x0, x0 + pw, timeTicks(xmax), sx);
+    s += `<text x="${x0 + pw / 2}" y="18" font-size="13" font-weight="700" text-anchor="middle" fill="#000">${title}</text>`;
+    s += `<text x="${x0 + pw / 2}" y="${H - 10}" font-size="12" text-anchor="middle" fill="#000">Time (h)</text>`;
+    s += `<text x="${x0 - 50}" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 ${x0 - 50} ${t + ph / 2})">${ylab}</text>`;
+    rows.forEach((c) => {
+      const d = byId[c.id][k];
+      const up = [], lo = [], ln = [];
+      d.mean.forEach((v, j) => {
+        if (v == null) return;
+        const e = d.sem[j] || 0;
+        up.push(`${r1(sx(hours[j]))} ${r1(sy(v + e))}`); lo.push(`${r1(sx(hours[j]))} ${r1(sy(Math.max(0, v - e)))}`); ln.push(`${r1(sx(hours[j]))} ${r1(sy(v))}`);
+      });
+      if (!ln.length) return;
+      s += `<path d="M${up.join('L')}L${lo.reverse().join('L')}Z" fill="${esc(c.color)}" fill-opacity="0.18" stroke="none"/>`;
+      s += `<path d="M${ln.join('L')}" fill="none" stroke="${esc(c.color)}" stroke-width="2" stroke-linejoin="round"${c.dashed ? ' stroke-dasharray="6 4"' : ''}/>`;
+    });
+    if (pi === 0) {
+      rows.forEach((c, j) => {
+        const y = 36 + j * 16, lx = x0 + 8;
+        s += `<path d="M${lx} ${y - 4}H${lx + 22}" stroke="${esc(c.color)}" stroke-width="2"${c.dashed ? ' stroke-dasharray="6 4"' : ''}/><text x="${lx + 28}" y="${y}" font-size="11" fill="#000">${esc(c.name.length > 26 ? c.name.slice(0, 25) + '…' : c.name)} (${byId[c.id].wells.length} well${byId[c.id].wells.length === 1 ? '' : 's'})</text>`;
+      });
+    }
+  });
+  return s + '</svg>';
+}
+
 function figSection(id, title, sub, svg) {
   return `<section class="card" aria-labelledby="${id}-h"><div class="card-head"><div><h2 id="${id}-h">${title}</h2><p>${sub}</p></div>
       <button class="btn" data-save="${id}" data-name="${esc(title)}">${ICON.down} Save PNG + SVG</button></div>
@@ -1329,10 +1456,11 @@ function stylesCard(d) {
 async function renderFigures() {
   if (!hasResults()) return needResults();
   if (!S.fig.data) main.innerHTML = header(5, 'Figures') + '<p class="muted">Loading…</p>';
-  let d;
-  try { d = await api('figures'); } catch (e) { return fail(e); }
+  let d, pop;
+  try { [d, pop] = await Promise.all([api('figures'), api('population')]); } catch (e) { return fail(e); }
   if (S.view !== 'figures') return;
   S.fig.data = d;
+  const hasCol = pop.conditions.some((c) => c.colonies && c.colonies.mean.some((v) => v != null));
   const e = S.st.experiment;
   const shown = d.conditions.filter((c) => !c.hidden && c.n > 0);
   const empty = '<p style="color:#444;padding:20px">No conditions to show. Assign wells on the plate map (step 1) or tick “Show” above.</p>';
@@ -1341,6 +1469,7 @@ async function renderFigures() {
     + figSection('fig-a', 'Cell-cycle composition over time', 'Every cell present in the first frame (a founder) is followed through its divisions, along one daughter each time. Colourless = neither reporter on; Unclassified = no longer tracked (lost or left the field).', shown.length ? figComposition(d, shown) : empty)
     + figSection('fig-b', 'Time spent in each phase', 'Hours in each phase, for phases seen from start to end inside the movie. One dot per cell per phase; boxes show the median and quartiles, whiskers 1.5 × IQR. Every value is ± one frame interval.', shown.length ? figDurations(d, shown) : empty)
     + figSection('fig-c', 'Phase fractions over time', 'Percent of the followed cells in each phase, per condition (same cells as the composition figure).', shown.length ? figFractions(d, shown) : empty)
+    + figSection('fig-d', 'Colonies over time', `From the confluence mask: touching cells form one colony; objects under ${num(S.st.experiment.settings.min_object_um2)} µm² are ignored as debris. Lines are the mean across wells, bands the SEM.`, !shown.length ? empty : hasCol ? figColonies(pop, shown) : '<p style="color:#444;padding:20px">No colony measurements yet: re-run the analysis.</p>')
     + `<p class="small muted">Saved figures go to the “figures” folder inside “PIP-FUCCI results”: SVG for Illustrator or Inkscape, PNG at 3× for slides. The numbers behind them are in every table export (“Figure data”).</p>`;
   bindFigures(d);
 }
@@ -1381,7 +1510,7 @@ function bindFigures(d) {
   $('#fig-saveall').onclick = async () => {
     let last = null;
     for (const b of $$('[data-save]')) last = await saveFigure(b.dataset.save, b.dataset.name, false) || last;
-    if (last) toast('Saved 3 figures (PNG + SVG).', { action: { label: 'Show in Finder', fn: () => api('reveal', { path: last.folder }).catch(fail) }, ms: 12000 });
+    if (last) toast(`Saved ${$$('[data-save]').length} figures (PNG + SVG).`, { action: { label: 'Show in Finder', fn: () => api('reveal', { path: last.folder }).catch(fail) }, ms: 12000 });
   };
 }
 
@@ -1494,7 +1623,7 @@ async function refreshUpdate() {
   const pill = document.getElementById('upd-pill');
   const banner = document.getElementById('banner');
   const ver = S.st ? S.st.version : '';
-  if (u.just_updated) toast(`PIP-FUCCI is now version ${u.just_updated}.`);
+  if (u.just_updated) toast(`CycleTrack is now version ${u.just_updated}.`);
   const busy = analysisRunning();
   if (!u.enabled) {  // running from source: just say a new release exists
     pill.innerHTML = u.available ? `<button class="pill ready" id="upd-btn">Download version ${esc(u.latest)}</button>` : `<span class="pill">Version <span class="mono">${esc(ver)}</span></span>`;
@@ -1504,7 +1633,7 @@ async function refreshUpdate() {
     pill.innerHTML = `<button class="pill ready" id="upd-btn" ${busy ? 'disabled' : ''} title="${busy ? 'Available when the analysis has finished' : 'Switches to the new version in a few seconds; your experiment stays open'}">${ICON.down} Update now · ${esc(u.ready_version)}</button>`;
     $('#upd-btn').onclick = updateNow;
     if (S.bannerHidden !== u.ready_version && !S.prefs.auto_install) {
-      banner.innerHTML = `<div class="banner"><div class="txt">${ICON.info}<span><strong>Version ${esc(u.ready_version)} of PIP-FUCCI is ready.</strong> <span class="muted">${busy ? 'You can update when the analysis finishes.' : 'Takes a few seconds; your experiment stays open.'}</span></span></div>
+      banner.innerHTML = `<div class="banner"><div class="txt">${ICON.info}<span><strong>Version ${esc(u.ready_version)} of CycleTrack is ready.</strong> <span class="muted">${busy ? 'You can update when the analysis finishes.' : 'Takes a few seconds; your experiment stays open.'}</span></span></div>
         <div style="display:flex;gap:8px"><button class="btn sm" id="upd-later">Later</button><button class="btn sm primary" id="upd-now" ${busy ? 'disabled' : ''} style="min-height:32px">Update now</button></div></div>`;
       $('#upd-now').onclick = updateNow;
       $('#upd-later').onclick = () => { S.bannerHidden = u.ready_version; banner.innerHTML = ''; };
@@ -1557,6 +1686,8 @@ async function openSettings() {
       <label class="toggle"><input type="checkbox" id="p-check" ${p.auto_check ? 'checked' : ''}><span class="t"><strong>Check for updates automatically</strong><span>Looks for a new version when the app opens and every 15 minutes, and downloads it in the background.</span></span></label>
       <label class="toggle"><input type="checkbox" id="p-install" ${p.auto_install ? 'checked' : ''}><span class="t"><strong>Install updates automatically</strong><span>Switches to a downloaded version the next time the app is opened, or after a minute without use when no analysis is running. Your experiment stays open. When off, use the blue “Update now” button at the top right.</span></span></label>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:10px;border-top:1px solid #23282D"><button class="btn sm" id="p-now">Check now</button><span class="small muted" id="set-status"></span></div></div>
+    <div><h3>Notifications</h3>
+      <label class="toggle"><input type="checkbox" id="p-notify" ${p.notify !== false ? 'checked' : ''}><span class="t"><strong>Notify me when an analysis finishes</strong><span>A macOS notification and a bounce of the Dock icon. While it runs, the Dock icon shows the progress. The first time, macOS asks whether CycleTrack may send notifications: click Allow.</span></span></label></div>
     <div><h3>Processing</h3>
       <div class="setrow"><div class="lbl"><label for="p-workers">Processor cores for analysis</label><span>Images are segmented in parallel. Auto uses all but one core, limited by memory. This Mac has ${p.cpus} core${p.cpus === 1 ? '' : 's'}.</span></div>
         <select class="input" id="p-workers" style="flex:0 0 150px"><option value="0" ${!p.workers ? 'selected' : ''}>Auto</option>${cores.map((n) => `<option value="${n}" ${p.workers === n ? 'selected' : ''}>${n}</option>`).join('')}</select></div></div>
@@ -1571,6 +1702,7 @@ async function openSettings() {
   $('#p-check').onchange = (ev) => save({ auto_check: ev.target.checked });
   $('#p-install').onchange = (ev) => save({ auto_install: ev.target.checked });
   $('#p-workers').onchange = (ev) => save({ workers: parseInt(ev.target.value, 10) });
+  $('#p-notify').onchange = (ev) => save({ notify: ev.target.checked });
   $('#p-now').onclick = async () => {
     $('#set-status').textContent = 'Checking…';
     try { await api('check_updates', {}); setTimeout(refreshUpdate, 1500); setTimeout(refreshUpdate, 5000); } catch (e) { fail(e); }

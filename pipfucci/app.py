@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
+
+from . import DISPLAY_NAME
 
 
 def _setup_logging():
@@ -59,14 +63,82 @@ def selftest() -> int:
         assert (out / "Tracks.csv").exists() and (out / "Figure data").is_dir()
         srv, port = serve(0)
         st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=10).read())
-        assert st["app"] == "PIP-FUCCI"
+        assert st["app"] == "PIP-FUCCI" and st["display_name"] == DISPLAY_NAME
         html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=10).read()
-        assert b"PIP-FUCCI" in html
+        assert DISPLAY_NAME.encode() in html
+        from . import macos
+
+        print("macos:", macos.selftest(), flush=True)
         js = urllib.request.urlopen(f"http://127.0.0.1:{port}/static/app.js", timeout=10).read()
         assert len(js) > 1000
         srv.shutdown()
     print("SELFTEST OK", flush=True)
     return 0
+
+
+def watch_jobs(window, port: int) -> None:
+    """In the window's process: Dock badge with the progress, keep the Mac from napping while an
+    analysis runs, and a notification + Dock bounce when it ends. Follows the window to a newer
+    backend after "Update now"."""
+    from urllib.parse import urlsplit
+
+    from . import macos
+    from .updater import load_prefs
+
+    last = None
+    badge = None
+    done_badge_at = None
+    while True:
+        time.sleep(1.5)
+        try:
+            u = urlsplit(window.get_current_url() or "")
+            base = f"{u.scheme}://{u.netloc}" if u.scheme.startswith("http") else f"http://127.0.0.1:{port}"
+        except Exception:
+            base = f"http://127.0.0.1:{port}"
+        try:
+            p = json.loads(urllib.request.urlopen(base + "/api/progress", timeout=5).read())
+        except Exception:
+            continue
+        long_job = p.get("job") in ("analysis", "retrack", "measure")
+        if p.get("running") and long_job:
+            if p.get("job") == "analysis":
+                macos.request_notifications()
+            macos.begin_activity("Analysing images", "watch")
+            label = f"{int(round(100 * (p.get('fraction') or 0)))}%"
+            if label != badge:
+                macos.set_badge(label)
+                badge = label
+            done_badge_at = None
+        elif last is not None and last.get("running") and last.get("started") == p.get("started"):
+            macos.end_activity("watch")
+            name = p.get("experiment") or "Your experiment"
+            job = last.get("job")
+            if p.get("cancelled") or job == "measure":
+                macos.set_badge(None)
+                badge = None
+            else:
+                failed = bool(p.get("error"))
+                badge = "!" if failed else "✓"
+                if macos.is_active():
+                    macos.set_badge(None)
+                    badge = None
+                else:
+                    macos.set_badge(badge)
+                    macos.bounce()
+                if load_prefs().get("notify", True):
+                    if failed:
+                        macos.notify("Analysis stopped", f"{name}: {p.get('error')}")
+                    else:
+                        what = "Tracks updated" if job == "retrack" else "Analysis finished"
+                        mins = (p.get("finished", 0) - p.get("started", 0)) / 60 if p.get("finished") else None
+                        took = f" in {mins:.0f} min" if mins and mins >= 1 else ""
+                        macos.notify(what, f"{name} is ready{took}. Open {DISPLAY_NAME} to see the results.")
+        elif badge in ("✓", "!") and macos.is_active():  # she has seen it
+            done_badge_at = done_badge_at or time.time()
+            if time.time() - done_badge_at > 2:
+                macos.set_badge(None)
+                badge = None
+        last = p
 
 
 class ShellApi:
@@ -157,10 +229,13 @@ def main(argv=None) -> int:
         import webview
 
         window = webview.create_window(
-            "PIP-FUCCI", url, width=1440, height=940, min_size=(1024, 700),
+            DISPLAY_NAME, url, width=1440, height=940, min_size=(1024, 700),
             background_color="#0E1012", text_select=True, js_api=ShellApi(),
         )
         STATE.window = window
+        import threading
+
+        threading.Thread(target=watch_jobs, args=(window, port), daemon=True, name="watch-jobs").start()
         webview.start()
         if STATE.restart_requested:
             from .updater import restart_into_newest
@@ -173,7 +248,7 @@ def main(argv=None) -> int:
     else:
         import webbrowser
 
-        print("PIP-FUCCI running at", url, flush=True)
+        print(DISPLAY_NAME, "running at", url, flush=True)
         webbrowser.open(url)
         try:
             while True:

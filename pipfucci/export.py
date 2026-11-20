@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import analysis
+from . import DISPLAY_NAME, analysis
 from .experiment import Experiment, run_info
 from .settings import save_json
 
@@ -70,6 +70,8 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
     _prism_table(exp, ws, "count_norm").to_csv(prism / "Cell number (fold of t0).csv", index=False)
     _prism_table(exp, ws, "total").to_csv(prism / "Cell number (detected nuclei).csv", index=False)
     _prism_table(exp, ws, "confluence").to_csv(prism / "Confluence (%).csv", index=False)
+    _prism_table(exp, ws, "colonies").to_csv(prism / "Colonies per image.csv", index=False)
+    _prism_table(exp, ws, "colony_area").to_csv(prism / "Average colony area (um2).csv", index=False)
 
     # durations, one column per condition (Prism column table)
     dur = analysis.durations_by_condition(exp)
@@ -85,7 +87,7 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
     pop = analysis.population(exp)
     rows = []
     for c in pop["conditions"]:
-        for metric in ["G1", "S", "G2M", "Colourless", "count_norm", "confluence"]:
+        for metric in ["G1", "S", "G2M", "Colourless", "count_norm", "confluence", "colonies", "colony_area"]:
             for h, m, s in zip(pop["hours"], c[metric]["mean"], c[metric]["sem"]):
                 rows.append({"condition": c["name"], "metric": metric, "time_h": h, "mean": m, "sem": s,
                              "n_wells": len(c["wells"])})
@@ -137,7 +139,7 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
     export_figure_data([exp] + list(others or []), out)
     save_json(out / "Settings and versions.json", run_info(exp))
     (out / "README.txt").write_text(
-        "PIP-FUCCI export\n\n"
+        f"{DISPLAY_NAME} export (PIP-FUCCI analysis)\n\n"
         "Prism tables/: one column per well, grouped by condition. Paste into a Prism grouped table.\n"
         "Phase calls are smoothed per track (order G1 -> S -> G2-M enforced). 'Colourless' means neither reporter\n"
         "was on (typically just after division); those cells are followed on phase contrast and their\n"

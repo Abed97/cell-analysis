@@ -75,7 +75,7 @@ def installed_versions() -> list[tuple[str, Path]]:
     return out
 
 
-PREFS_DEFAULT = {"auto_check": True, "auto_install": True, "workers": 0}
+PREFS_DEFAULT = {"auto_check": True, "auto_install": True, "workers": 0, "notify": True}
 
 
 def load_prefs() -> dict:
@@ -94,7 +94,7 @@ def load_prefs() -> dict:
 def save_prefs(patch: dict) -> dict:
     cur = load_prefs()
     for k, v in (patch or {}).items():
-        if k in ("auto_check", "auto_install"):
+        if k in ("auto_check", "auto_install", "notify"):
             cur[k] = bool(v)
         elif k == "workers":
             try:

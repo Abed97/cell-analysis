@@ -21,11 +21,12 @@ import pandas as pd
 from . import __version__
 from . import io_incucyte as io
 from . import phases as ph
-from .pipeline import segment_chunk, track_job
+from .pipeline import measure_job, segment_chunk, threshold_job, track_job
 from .settings import Settings, default_conditions, load_json, save_json
 
 SEG_KEYS = {"channel_map", "nucleus_um", "pixel_um", "sensitivity", "method", "bg_radius_um"}
 TRACK_KEYS = {"interval_min", "max_speed_um_h", "max_gap_h", "colourless_h"}
+MEASURE_KEYS = {"min_object_um2"}  # only the confluence / colony numbers: re-measured from saved masks
 CLASSIFY_KEYS = {"smoothing_h", "gate_green", "gate_red", "parental_well"}
 
 
@@ -37,7 +38,7 @@ class Cancelled(Exception):
 
 
 def worker_count(n_jobs: int = 10 ** 6, setting=None) -> int:
-    """Worker processes: all cores but one, capped by memory (about 1 GB each for 1408x1040 movies)."""
+    """Worker processes: all cores but one, capped by memory (about 1.5 GB each for 1408x1040 movies)."""
     if setting not in (None, "auto"):
         try:
             return max(1, min(int(setting), n_jobs))
@@ -47,35 +48,54 @@ def worker_count(n_jobs: int = 10 ** 6, setting=None) -> int:
     n = max(1, cpus - 1)
     try:
         mem_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
-        n = min(n, max(1, int(mem_gb // 1.0) - 1))
+        n = min(n, max(1, int((mem_gb - 2.0) // 1.5)))
     except Exception:
         pass
     return max(1, min(n, 12, n_jobs))
 
 
+def _worker_init():
+    """In each worker process: keep macOS from slowing it down (App Nap) while it works."""
+    try:
+        from .macos import begin_activity
+
+        begin_activity("Analysing images")
+    except Exception:
+        pass
+
+
 class WorkerPool:
-    """Process pool with per-frame progress and cancel; falls back to running in this process."""
+    """Process pool with per-frame progress and cancel. If a worker dies (for example the Mac ran
+    out of memory), the unfinished jobs are retried with fewer workers, then in this process."""
 
     def __init__(self, workers: int):
         self.workers = workers
         self.ex = None
         self.manager = None
+        self.q = None
+
+    def _start(self, n):
+        import multiprocessing as mp
+
+        ctx = mp.get_context("spawn")
+        if self.manager is None:
+            self.manager = ctx.Manager()
+            self.q = self.manager.Queue()
+        self.ex = ProcessPoolExecutor(max_workers=n, mp_context=ctx, initializer=_worker_init)
+        self.workers = n
 
     def __enter__(self):
         if self.workers > 1:
             try:
-                import multiprocessing as mp
-
-                ctx = mp.get_context("spawn")
-                self.manager = ctx.Manager()
-                self.q = self.manager.Queue()
-                self.ex = ProcessPoolExecutor(max_workers=self.workers, mp_context=ctx)
+                self._start(self.workers)
             except Exception:
                 self.ex = None
         return self
 
     def __exit__(self, *exc):
         if self.ex is not None:
+            if exc[0] is not None:
+                self._kill()
             self.ex.shutdown(wait=exc[0] is None, cancel_futures=True)
         if self.manager is not None:
             try:
@@ -85,23 +105,35 @@ class WorkerPool:
         return False
 
     def _kill(self):
-        for proc in list(getattr(self.ex, "_processes", {}).values()):
+        for proc in list((getattr(self.ex, "_processes", None) or {}).values()):
             try:
                 proc.terminate()
             except Exception:
                 pass
 
     def map(self, fn, jobs, cancel, on_frame=None):
-        if self.ex is not None:
+        jobs = list(jobs)
+        results = [None] * len(jobs)
+        todo = list(range(len(jobs)))
+        while self.ex is not None and todo:
             try:
-                return self._map_pool(fn, jobs, cancel, on_frame)
-            except Cancelled:
-                raise
-            except Exception:
+                futs = {i: self.ex.submit(fn, {**jobs[i], "progress_q": self.q}) for i in todo}
+            except Exception:  # the pool cannot take jobs: run them here
                 self._kill()
                 self.ex.shutdown(wait=False, cancel_futures=True)
                 self.ex = None
-        out = []
+                break
+            todo = self._wait(futs, results, cancel, on_frame)
+            if todo:  # a worker died: retry the rest with fewer workers
+                self._kill()
+                self.ex.shutdown(wait=False, cancel_futures=True)
+                self.ex = None
+                n = self.workers // 2
+                if n >= 2:
+                    try:
+                        self._start(n)
+                    except Exception:
+                        self.ex = None
 
         class Q:
             def put(_self, _):
@@ -110,26 +142,36 @@ class WorkerPool:
                 if cancel.is_set():
                     raise Cancelled()
 
-        for j in jobs:
+        for i in todo:
             if cancel.is_set():
                 raise Cancelled()
-            out.append(fn({**j, "progress_q": Q()}))
-        return out
+            results[i] = fn({**jobs[i], "progress_q": Q()})
+        return results
 
-    def _map_pool(self, fn, jobs, cancel, on_frame):
-        futs = [self.ex.submit(fn, {**j, "progress_q": self.q}) for j in jobs]
-        results = [None] * len(futs)
-        pending = dict(enumerate(futs))
-        while pending:
+    def _wait(self, futs, results, cancel, on_frame):
+        """Collects results; returns the jobs lost because a worker process died. An error inside
+        a job (a broken image, say) stops everything and is reported."""
+        from concurrent.futures.process import BrokenProcessPool
+
+        failed = []
+        while futs:
             if cancel.is_set():
-                for f in futs:
+                for f in futs.values():
                     f.cancel()
                 self._kill()
                 raise Cancelled()
-            for i, f in list(pending.items()):
+            for i, f in list(futs.items()):
                 if f.done():
-                    results[i] = f.result()
-                    del pending[i]
+                    del futs[i]
+                    try:
+                        results[i] = f.result()
+                    except BrokenProcessPool:
+                        failed.append(i)
+                    except BaseException:
+                        for g in futs.values():
+                            g.cancel()
+                        self._kill()
+                        raise
             while True:
                 try:
                     self.q.get_nowait()
@@ -138,7 +180,7 @@ class WorkerPool:
                 if on_frame:
                     on_frame()
             time.sleep(0.2)
-        return results
+        return failed
 
 
 def versions() -> dict:
@@ -262,6 +304,8 @@ class Experiment:
                     self.classify()
                     self._save_results()
                     action = "reclassified"
+                elif changed & MEASURE_KEYS and self.stale is None:
+                    action = "remeasure"
             self.save()
             return {"changed": sorted(changed), "stale": self.stale, "action": action}
 
@@ -278,42 +322,49 @@ class Experiment:
             "min_cycle_frames": max(2, int(round(10.0 / s.interval_h))),
             "sensitivity": s.sensitivity,
             "method": s.method,
+            "min_object_halfpx": s.min_object_um2 / (2 * s.pixel_um) ** 2,  # cell masks are stored at half size
+            "halfpx_um2": (2 * s.pixel_um) ** 2,
         }
 
     # ------------------------------------------------------------ run
     def _jobs(self):
+        """Chunk jobs for segmentation. Masks of a new run go to masks.new and replace the old ones
+        only when the run has finished, so a cancelled re-run leaves the previous results intact."""
         mf = self.movie_files()
         movies = mf.movies()
         if not movies:
             raise ValueError("No movies found with the current channel assignment.")
         sd = self.derived_numbers()
-        mask_root = self.results_dir / "masks"
+        mask_root = self.results_dir / "masks.new"
+        if mask_root.exists():
+            shutil.rmtree(mask_root, ignore_errors=True)
         chunk_jobs, movie_info = [], {}
         for mv in movies:
             frames = mf.frames(mv)
             paths = {f: dict(mf.files[mv][f]) for f in frames}
             mdir = mask_root / movie_key(*mv)
-            if mdir.exists():
-                shutil.rmtree(mdir, ignore_errors=True)
-            old = mask_root / (movie_key(*mv) + ".npz")
-            if old.exists():
-                old.unlink()
-            # one confluence threshold per movie, from the first and middle frames
-            thr = []
-            for f in (frames[0], frames[len(frames) // 2]):
-                ph_img = io.read_channel(paths[f].get("phase"))
-                if ph_img is not None:
-                    from .segment import cell_mask
-
-                    thr.append(cell_mask(ph_img, sd["nucleus_px"])[1])
-            conf_thr = float(np.mean(thr)) if thr else None
-            movie_info[mv] = {"frames": frames, "paths": paths, "mask_dir": str(mdir)}
+            movie_info[mv] = {"frames": frames, "paths": paths, "mask_dir": str(mdir),
+                              "thr_paths": [paths[f].get("phase") for f in (frames[0], frames[len(frames) // 2])]}
             for i in range(0, len(frames), CHUNK):
                 fr = frames[i:i + CHUNK]
                 chunk_jobs.append({"movie": mv, "frames": fr, "paths": {f: paths[f] for f in fr},
                                    "prev": paths[frames[i - 1]] if i > 0 else None, "settings": sd,
-                                   "mask_path": str(mdir / f"chunk_{fr[0]:05d}.npz"), "conf_thr": conf_thr})
+                                   "mask_path": str(mdir / f"chunk_{fr[0]:05d}.npz"), "conf_thr": None})
         return chunk_jobs, movie_info, sd
+
+    def _swap_masks(self) -> None:
+        new, cur, old = (self.results_dir / n for n in ("masks.new", "masks", "masks.old"))
+        if not new.exists():
+            return
+        if old.exists():
+            shutil.rmtree(old, ignore_errors=True)
+        if cur.exists():
+            cur.rename(old)
+        new.rename(cur)
+        shutil.rmtree(old, ignore_errors=True)
+
+    def _discard_new_masks(self) -> None:
+        shutil.rmtree(self.results_dir / "masks.new", ignore_errors=True)
 
     def run(self, progress=None, cancel: threading.Event | None = None, workers: int | None = None) -> None:
         ok, msg = self.channels_ok()
@@ -326,44 +377,112 @@ class Experiment:
         t0 = time.time()
         state = {"done": 0}
 
-        def report(stage, frac=None):
-            if frac is None:
-                frac = 0.9 * state["done"] / max(1, total)
+        def report(stage):
+            seg_frac = state["done"] / max(1, total)
             el = time.time() - t0
-            eta = el / frac - el if frac > 0.03 else None
-            progress(stage=stage, done=state["done"], total=total, fraction=min(frac, 0.99), eta_s=eta,
-                     workers=workers)
+            # segmentation is ~90% of the work; tracking the rest
+            eta = (el / seg_frac - el) / 0.9 if seg_frac > 0.02 else None
+            progress(stage=stage, done=state["done"], total=total, unit="frames",
+                     fraction=min(0.02 + 0.88 * seg_frac, 0.99), eta_s=eta, workers=workers)
 
         workers = workers or worker_count(len(chunk_jobs))
-        report("Segmenting")
-        with WorkerPool(workers) as pool:
-            seg_results = pool.map(segment_chunk, chunk_jobs, cancel,
-                                   on_frame=lambda: (state.__setitem__("done", state["done"] + 1), report("Segmenting")))
-            by_movie = {}
-            for r in seg_results:
-                by_movie.setdefault(r["movie"], []).append(r)
-            track_jobs = []
-            for mv, parts in by_movie.items():
-                parts.sort(key=lambda r: r["frames"][0])
-                det = {k: np.concatenate([p["det"][k] for p in parts]) for k in parts[0]["det"]}
-                steps, conf = {}, {}
-                for p in parts:
-                    steps.update(p["steps"])
-                    conf.update(p["conf"])
-                info = movie_info[mv]
-                track_jobs.append({"movie": mv, "frames": info["frames"], "det": det, "steps": steps, "conf": conf,
-                                   "shape": parts[0]["shape"], "settings": sd, "mask_dir": info["mask_dir"],
-                                   "paths": info["paths"], "ranges": parts[0]["ranges"]})
-            report("Tracking", 0.9)
-            results = pool.map(track_job, track_jobs, cancel)
-        progress(stage="Calling phases", done=total, total=total, fraction=0.99, eta_s=0)
-        self._assemble(results)
-        self.stale = None
-        self.flags = {}
-        self.save_flags()
-        self.classify()
-        self._save_results()
-        self.save()
+        try:
+            with WorkerPool(workers) as pool:
+                # one confluence threshold per field, from its first and middle frames
+                n_mov = len(movie_info)
+                prep = {"n": 0}
+
+                def prepared():
+                    prep["n"] += 1
+                    progress(stage="Preparing", done=prep["n"], total=n_mov, unit="fields",
+                             fraction=0.02 * prep["n"] / n_mov, eta_s=None, workers=workers)
+
+                progress(stage="Preparing", done=0, total=n_mov, unit="fields", fraction=0.0, eta_s=None,
+                         workers=workers)
+                mvs = list(movie_info)
+                thrs = pool.map(threshold_job, [{"movie": mv, "paths": movie_info[mv]["thr_paths"],
+                                                 "nucleus_px": sd["nucleus_px"]} for mv in mvs], cancel,
+                                on_frame=prepared)
+                thr_of = dict(zip(mvs, thrs))
+                for j in chunk_jobs:
+                    j["conf_thr"] = thr_of.get(j["movie"])
+                t0 = time.time()
+                report("Segmenting")
+                seg_results = pool.map(segment_chunk, chunk_jobs, cancel,
+                                       on_frame=lambda: (state.__setitem__("done", state["done"] + 1),
+                                                         report("Segmenting")))
+                by_movie = {}
+                for r in seg_results:
+                    by_movie.setdefault(r["movie"], []).append(r)
+                track_jobs = []
+                for mv, parts in by_movie.items():
+                    parts.sort(key=lambda r: r["frames"][0])
+                    det = {k: np.concatenate([p["det"][k] for p in parts]) for k in parts[0]["det"]}
+                    steps, conf = {}, {}
+                    for p in parts:
+                        steps.update(p["steps"])
+                        conf.update(p["conf"])
+                    info = movie_info[mv]
+                    track_jobs.append({"movie": mv, "frames": info["frames"], "det": det, "steps": steps,
+                                       "conf": conf, "shape": parts[0]["shape"], "settings": sd,
+                                       "mask_dir": info["mask_dir"], "paths": info["paths"],
+                                       "ranges": parts[0]["ranges"]})
+                state["movies"] = 0
+                n_tr = max(1, len(track_jobs))
+
+                def tracked():
+                    state["movies"] += 1
+                    progress(stage="Tracking", done=state["movies"], total=n_tr, unit="fields",
+                             fraction=0.9 + 0.08 * state["movies"] / n_tr, eta_s=None, workers=workers)
+
+                progress(stage="Tracking", done=0, total=n_tr, unit="fields", fraction=0.9, eta_s=None,
+                         workers=workers)
+                results = pool.map(track_job, track_jobs, cancel, on_frame=tracked)
+            progress(stage="Calling phases", done=total, total=total, unit="frames", fraction=0.99, eta_s=0)
+            self._assemble(results)
+            self.stale = None
+            self.flags = {}
+            self.save_flags()
+            self.classify()
+            self._swap_masks()
+            self._save_results()
+            self.save()
+        except BaseException:
+            self._discard_new_masks()
+            raise
+        progress(stage="Done", done=total, total=total, fraction=1.0, eta_s=0)
+
+    def remeasure(self, progress=None, cancel: threading.Event | None = None, workers: int | None = None) -> None:
+        """Confluence and colonies again from the saved cell masks (after the debris size changed)."""
+        progress = progress or (lambda **kw: None)
+        cancel = cancel or threading.Event()
+        with self.lock:
+            sd = self.derived_numbers()
+            jobs = [{"movie": k, "frames": m["frames"], "settings": sd,
+                     "mask_dir": str(self.results_dir / "masks" / k)} for k, m in self.meta.get("movies", {}).items()]
+        total = sum(len(j["frames"]) for j in jobs)
+        state = {"done": 0}
+
+        def tick():
+            state["done"] += 1
+            progress(stage="Measuring confluence", done=state["done"], total=total, unit="frames",
+                     fraction=min(0.99, state["done"] / max(1, total)), eta_s=None)
+
+        progress(stage="Measuring confluence", done=0, total=total, unit="frames", fraction=0.0, eta_s=None)
+        workers = workers or worker_count(len(jobs))
+        with WorkerPool(workers if total > 400 else 1) as pool:
+            res = pool.map(measure_job, jobs, cancel, on_frame=tick)
+        with self.lock:
+            for r in res:
+                m = self.meta["movies"].get(r["movie"])
+                if m is None:
+                    continue
+                old = m.get("confluence") or [None] * len(r["confluence"])
+                m["confluence"] = [a if a is not None else b for a, b in zip(r["confluence"], old)]
+                m["colonies"] = r["colonies"]
+                m["colony_area"] = r["colony_area"]
+            self.meta["measured_min_object_um2"] = self.settings.min_object_um2
+            save_json(self.results_dir / "meta.json", self.meta)
         progress(stage="Done", done=total, total=total, fraction=1.0, eta_s=0)
 
     def _assemble(self, results: list[dict]) -> None:
@@ -394,6 +513,9 @@ class Experiment:
             movies_meta[movie_key(well, fld)] = {
                 "well": well, "field": int(fld), "frames": [int(f) for f in r["frames"]],
                 "confluence": [None if (c is None or not np.isfinite(c)) else float(c) for c in r["confluence"]],
+                "colonies": [None if c is None else int(c) for c in r.get("colonies") or [None] * len(r["frames"])],
+                "colony_area": [None if (c is None or not np.isfinite(c)) else round(float(c), 1)
+                                for c in r.get("colony_area") or [None] * len(r["frames"])],
                 "shifts": r["shifts"], "ranges": r["ranges"], "shape": r["shape"], "seconds": r["seconds"],
             }
         cells = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
@@ -401,6 +523,7 @@ class Experiment:
         self.cells = cells
         self.meta = {
             "movies": movies_meta,
+            "measured_min_object_um2": self.settings.min_object_um2,
             "parents": parents,
             "low_conf": sorted(low_conf),
             "times_min": self.index["times_min"],

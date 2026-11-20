@@ -15,6 +15,7 @@ import zipfile
 from pathlib import Path
 
 import numpy as np
+from scipy import ndimage as ndi
 
 from . import io_incucyte as io
 from . import segment as seg
@@ -165,6 +166,64 @@ def _local_signal(img: np.ndarray, x: float, y: float, r: float) -> float:
     return float(inner.mean() - np.median(ring))
 
 
+def object_filter(mask: np.ndarray, min_px: float):
+    """Split a cell mask into separate objects (colonies; touching cells are one object) and mark
+    those at least min_px pixels big. Returns (labels, sizes, keep) with index 0 = background."""
+    lab, n = ndi.label(mask, structure=np.ones((3, 3), bool))
+    sizes = np.bincount(lab.ravel(), minlength=n + 1)
+    sizes[0] = 0
+    keep = sizes >= max(1.0, float(min_px))
+    keep[0] = False
+    return lab, sizes, keep
+
+
+def measure_movie(mask_dir, frames, min_halfpx: float, halfpx_um2: float, progress_q=None) -> dict:
+    """Confluence, colony number and mean colony area per frame from the stored cell masks
+    (half resolution), ignoring objects smaller than the debris size."""
+    masks = MovieMasks(mask_dir)
+    out = {"confluence": [], "colonies": [], "colony_area": []}
+    for f in frames:
+        m = masks.cells(f)
+        if m is None:
+            for k in out:
+                out[k].append(None)
+        else:
+            _, sizes, keep = object_filter(m.astype(bool), min_halfpx)
+            k = int(keep.sum())
+            tot = float(sizes[keep].sum())
+            out["confluence"].append(tot / m.size)
+            out["colonies"].append(k)
+            out["colony_area"].append(tot * halfpx_um2 / k if k else None)
+        if progress_q is not None:
+            try:
+                progress_q.put(1)
+            except Exception:
+                pass
+    return out
+
+
+def threshold_job(job: dict) -> float | None:
+    """Phase-contrast texture threshold for the confluence mask of one field (first + middle frame)."""
+    thr = []
+    for p in job["paths"]:
+        img = io.read_channel(p) if p else None
+        if img is not None:
+            thr.append(seg.cell_mask(img, job["nucleus_px"])[1])
+    q_ = job.get("progress_q")
+    if q_ is not None:
+        try:
+            q_.put(1)
+        except Exception:
+            pass
+    return float(np.mean(thr)) if thr else None
+
+
+def measure_job(job: dict) -> dict:
+    s = job["settings"]
+    return {"movie": job["movie"], **measure_movie(job["mask_dir"], job["frames"], s["min_object_halfpx"],
+                                                     s["halfpx_um2"], job.get("progress_q"))}
+
+
 def track_job(job: dict) -> dict:
     """job: movie, frames, det (arrays), steps {f: (dy, dx)}, conf {f: c}, shape, settings,
     mask_dir, paths {f: {channel: path}}, ranges."""
@@ -244,6 +303,17 @@ def track_job(job: dict) -> dict:
                 vtid.append(sid)
                 vxr.append(x)
                 vyr.append(y)
+    conf = [job["conf"].get(f) for f in frames]
+    meas = {"colonies": [None] * len(frames), "colony_area": [None] * len(frames)}
+    if has_cells and "min_object_halfpx" in s:
+        meas = measure_movie(job["mask_dir"], frames, s["min_object_halfpx"], s["halfpx_um2"])
+        conf = [m if m is not None else c for m, c in zip(meas["confluence"], conf)]
+    q_ = job.get("progress_q")
+    if q_ is not None:
+        try:
+            q_.put(1)  # one movie tracked
+        except Exception:
+            pass
     n_real = len(cat["frame"])
     out = {}
     for k in DET_KEYS:
@@ -260,7 +330,9 @@ def track_job(job: dict) -> dict:
         "parent": tr["parent"],
         "low_conf": sorted(tr["low_conf"]),
         "frames": frames,
-        "confluence": [job["conf"].get(f) for f in frames],
+        "confluence": conf,
+        "colonies": meas["colonies"],
+        "colony_area": meas["colony_area"],
         "shifts": [list(sh[f]) for f in frames],
         "ranges": job["ranges"],
         "shape": shape,

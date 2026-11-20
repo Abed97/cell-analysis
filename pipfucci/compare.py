@@ -78,7 +78,7 @@ def population(exps: list[Experiment]) -> dict:
     lab = {id(e): n for e, n in zip(exps, exp_labels(exps))}
     conds = []
     for grp in groups(exps, include_hidden=True):
-        series = {k: [] for k in A.CALLS + ["count_norm", "confluence", "total"]}
+        series = {k: [] for k in A.CALLS + ["count_norm", "confluence", "total", "colonies", "colony_area"]}
         wells = []
         for e, ws_names in grp["members"]:
             ws = A.well_series(e)
@@ -89,7 +89,7 @@ def population(exps: list[Experiment]) -> dict:
                 wells.append(w if len(exps) == 1 else f"{lab[id(e)]}: {w}")
                 for i, p in enumerate(A.CALLS):
                     series[p].append(_resample(hours, ws[w]["frac"][:, i], g))
-                for k in ("count_norm", "confluence", "total"):
+                for k in ("count_norm", "confluence", "total", "colonies", "colony_area"):
                     series[k].append(_resample(hours, ws[w][k], g))
         if not wells:
             continue

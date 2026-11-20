@@ -10,11 +10,13 @@ sys.path.insert(0, ROOT)
 from pipfucci import __version__  # noqa: E402
 
 hidden = ["pipfucci." + m for m in ("app", "server", "experiment", "pipeline", "segment", "track", "phases",
-                                     "analysis", "export", "render", "demo", "io_incucyte", "settings", "updater")]
+                                     "analysis", "export", "render", "demo", "io_incucyte", "settings", "updater",
+                                     "compare", "macos")]
 for pkg in ("skimage.feature", "skimage.segmentation", "skimage.filters", "skimage.registration", "imagecodecs"):
     hidden += collect_submodules(pkg)
 if sys.platform == "darwin":
-    hidden += ["webview", "webview.platforms.cocoa"]
+    hidden += ["webview", "webview.platforms.cocoa", "Foundation", "AppKit", "PyObjCTools.AppHelper",
+               "UserNotifications"]
 try:  # optional build info written by CI
     import pipfucci._build_info  # noqa: F401
     hidden.append("pipfucci._build_info")
@@ -50,8 +52,10 @@ if sys.platform == "darwin":
         bundle_identifier="org.pipfucci.app",
         version=__version__,
         info_plist={
-            "CFBundleName": "PIP-FUCCI",
-            "CFBundleDisplayName": "PIP-FUCCI",
+            # shown as CycleTrack (menu bar, Dock, notifications); the bundle and executable keep the
+            # internal name PIP-FUCCI so installed copies keep updating themselves
+            "CFBundleName": "CycleTrack",
+            "CFBundleDisplayName": "CycleTrack",
             "CFBundleShortVersionString": __version__,
             "CFBundleVersion": __version__,
             "LSMinimumSystemVersion": "12.0",
@@ -60,10 +64,10 @@ if sys.platform == "darwin":
             "LSApplicationCategoryType": "public.app-category.education",
             # the window talks to the app's own server on 127.0.0.1
             "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
-            "NSDocumentsFolderUsageDescription": "PIP-FUCCI reads Incucyte images and saves results next to them.",
-            "NSDesktopFolderUsageDescription": "PIP-FUCCI reads Incucyte images and saves results next to them.",
-            "NSDownloadsFolderUsageDescription": "PIP-FUCCI reads Incucyte images and saves results next to them.",
-            "NSRemovableVolumesUsageDescription": "PIP-FUCCI reads Incucyte images from external drives.",
-            "NSNetworkVolumesUsageDescription": "PIP-FUCCI reads Incucyte images from network drives.",
+            "NSDocumentsFolderUsageDescription": "CycleTrack reads Incucyte images and saves results next to them.",
+            "NSDesktopFolderUsageDescription": "CycleTrack reads Incucyte images and saves results next to them.",
+            "NSDownloadsFolderUsageDescription": "CycleTrack reads Incucyte images and saves results next to them.",
+            "NSRemovableVolumesUsageDescription": "CycleTrack reads Incucyte images from external drives.",
+            "NSNetworkVolumesUsageDescription": "CycleTrack reads Incucyte images from network drives.",
         },
     )

@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+@page { size: Letter; margin: 0.45in; }
+body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; color: #1a1d21; font-size: 11.5pt; line-height: 1.38; }
+h1 { font-size: 22pt; margin: 0 0 4pt; } .sub { color: #555; margin: 0 0 12pt; }
+.step { display: flex; gap: 14pt; margin: 0 0 9pt; padding: 9pt 12pt; border: 1px solid #d9dde2; border-radius: 10pt; }
+.n { flex: 0 0 26pt; height: 26pt; border-radius: 13pt; background: #1a1d21; color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.step b { display: block; margin-bottom: 2pt; } .q { font-family: Menlo, monospace; background: #f1f3f5; padding: 1pt 4pt; border-radius: 4pt; font-size: 11pt; }
+.note { margin-top: 10pt; padding: 9pt 12pt; background: #f6f7f8; border-radius: 10pt; font-size: 10.5pt; color: #333; }
+.dots { display:inline-block; vertical-align: middle; margin-right: 8pt; }
+</style></head><body>
+<h1><svg class="dots" width="28" height="28" viewBox="0 0 30 30"><circle cx="11" cy="12" r="7.5" fill="#3FBF6A"/><circle cx="19" cy="12" r="7.5" fill="#E5486E" fill-opacity=".9"/><circle cx="15" cy="19" r="7.5" fill="#F2C94C" fill-opacity=".9"/></svg>Opening CycleTrack the first time</h1>
+<p class="sub">CycleTrack is free and isn’t sold through Apple, so macOS asks you to approve it once. After that it opens like any other app.</p>
+<div class="step"><div class="n">1</div><div><b>Drag CycleTrack into Applications</b>In this window, drag the CycleTrack icon onto the Applications folder. Then eject the disk (the CycleTrack icon on your desktop or in the Finder sidebar).</div></div>
+<div class="step"><div class="n">2</div><div><b>Double-click CycleTrack in Applications</b>macOS says it <i>could not verify</i> CycleTrack. Click <span class="q">Done</span>. (Don’t click Move to Trash.)</div></div>
+<div class="step"><div class="n">3</div><div><b>Open System Settings › Privacy &amp; Security</b>Apple menu › System Settings… › Privacy &amp; Security. Scroll down to the <i>Security</i> section, where it says CycleTrack was blocked. Click <span class="q">Open Anyway</span>.</div></div>
+<div class="step"><div class="n">4</div><div><b>Confirm</b>Enter your Mac password (or use Touch ID), then click <span class="q">Open Anyway</span> or <span class="q">Open</span> in the last message. CycleTrack opens.</div></div>
+<div class="step"><div class="n">5</div><div><b>Allow access to your images</b>The first time you open a folder in Documents, Desktop or an external drive, macOS asks whether CycleTrack may access it. Click <span class="q">Allow</span>.</div></div>
+<div class="note"><b>On macOS 12, 13 or 14</b> there’s a shortcut for steps 2 to 4: hold Control, click CycleTrack in Applications, choose <span class="q">Open</span>, then <span class="q">Open</span> again.<br><br>
+<b>If macOS says CycleTrack “is damaged”</b>, open the Terminal app, paste this line and press Return, then open CycleTrack again:<br>
+<span class="q">xattr -dr com.apple.quarantine /Applications/CycleTrack.app</span><br><br>
+<b>Updates</b> install themselves: the version and an <span class="q">Update now</span> button appear at the top right of the window. Your experiments and results are kept; they live next to your images.<br><br><b>Notifications:</b> the first time an analysis runs, macOS asks whether CycleTrack may send notifications. Click <span class="q">Allow</span> to be told when it finishes.</div>
+</body></html>

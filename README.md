@@ -1,19 +1,25 @@
-# PIP-FUCCI
+# CycleTrack
 
-A Mac app for PIP-FUCCI time-lapse experiments from the Incucyte. It segments nuclei, tracks
-them through divisions, calls G1 / S / G2-M from the red and green reporters, and produces
-population and single-cell results ready for Prism. Everything runs on the Mac: no account,
-no sign-in, no internet needed, and images never leave the computer.
+A Mac app for PIP-FUCCI time-lapse experiments from the Incucyte (it was called PIP-FUCCI until
+version 0.1.7). It segments nuclei, tracks them through divisions, calls G1 / S / G2-M from the
+red and green reporters, measures confluence and colonies, and produces population, single-cell
+and publication-ready results. Everything runs on the Mac: no account, no sign-in, no internet
+needed (except to download updates), and images never leave the computer.
 
 ## Install
 
 1. Download the DMG for your Mac (Apple menu > About This Mac shows *Apple M…* or *Intel*):
-   - Apple silicon: [PIP-FUCCI-AppleSilicon.dmg](https://github.com/Abed97/cell-analysis/releases/latest/download/PIP-FUCCI-AppleSilicon.dmg)
-   - Intel: [PIP-FUCCI-Intel.dmg](https://github.com/Abed97/cell-analysis/releases/latest/download/PIP-FUCCI-Intel.dmg)
-2. Open it and drag **PIP-FUCCI** onto **Applications**.
-3. First time only: double-click PIP-FUCCI and click **Done** on the warning. Then open
+   - Apple silicon: [CycleTrack-AppleSilicon.dmg](https://github.com/Abed97/cell-analysis/releases/latest/download/CycleTrack-AppleSilicon.dmg)
+   - Intel: [CycleTrack-Intel.dmg](https://github.com/Abed97/cell-analysis/releases/latest/download/CycleTrack-Intel.dmg)
+2. Open it and drag **CycleTrack** onto **Applications**.
+3. First time only: double-click CycleTrack and click **Done** on the warning. Then open
    **System Settings › Privacy & Security**, scroll down, click **Open Anyway**, and confirm.
-   The DMG includes a one-page guide, *How to open PIP-FUCCI the first time.pdf*.
+   The DMG includes a one-page guide, *How to open CycleTrack the first time.pdf*.
+
+Copies installed under the old name keep updating themselves and show the new name in the window,
+menu bar and notifications; the icon in Applications keeps the old name unless it is renamed in
+Finder (safe to do). Internally the app bundle, update files and
+`~/Library/Application Support/PIP-FUCCI` keep the old name so those copies keep updating.
 
 The app isn't registered with Apple (that needs a paid developer account), which is why macOS asks
 once. Needs macOS 12 or later.
@@ -59,6 +65,17 @@ affected; they live next to the images.
    `PIP-FUCCI results/figures/`. **Add analysed experiment…** brings other analysed folders into
    the Figures and Population pages; conditions with the same name are pooled, wells stay the
    replicates.
+
+**Confluence and colonies** come from a phase-contrast mask of every cell, coloured or not.
+Objects smaller than *Smallest object counted* (step 2, default 50 µm²) are debris: drawn with an
+orange outline and left out. Touching cells form one colony; the Population and Figures pages
+plot colony number per image and average colony area over time. Changing the debris size only
+re-measures from the saved masks (seconds), it doesn't re-run the analysis.
+
+**While it runs** the top bar and the Dock icon show the progress, the Mac doesn't nap or sleep, and
+a notification plus a Dock bounce say when it's done (turn off in Settings). Frames are processed
+on several cores; if one worker process dies (for example memory runs out), its frames are retried
+with fewer workers instead of stopping.
 
 Everything is saved automatically (settings, plate map, gates, track flags, results) in
 `PIP-FUCCI results` next to the images; the top bar shows when it was last saved.

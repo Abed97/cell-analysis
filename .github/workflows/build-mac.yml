@@ -84,7 +84,14 @@ jobs:
       - name: Self-test the built app (demo data, analysis, export, server)
         env:
           PIPFUCCI_NO_UPDATES: "1"
-        run: dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --selftest
+        run: |
+          out="$(dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --selftest)"
+          echo "$out"
+          grep -q "SELFTEST OK" <<<"$out"
+          # Dock badge, App Nap prevention and notifications made it into the app
+          grep -q "activity=True" <<<"$out"
+          grep -q "usernotifications=yes" <<<"$out"
+          grep -q "appkit=yes" <<<"$out"
 
       - name: Package the app for automatic updates
         run: |
@@ -112,26 +119,28 @@ jobs:
           PORT="$(cat "$R")"
           echo "backend on port $PORT"
           curl -sf "http://127.0.0.1:$PORT/api/state" | grep -q '"PIP-FUCCI"'
-          curl -sf "http://127.0.0.1:$PORT/" | grep -q "PIP-FUCCI"
+          curl -sf "http://127.0.0.1:$PORT/" | grep -q "CycleTrack"
           kill %1 || true
 
       - name: Make the DMG
         run: |
+          # new installs see "CycleTrack.app"; inside, the executable keeps its internal name
           mkdir dmg
-          cp -R dist/PIP-FUCCI.app dmg/
+          cp -R dist/PIP-FUCCI.app dmg/CycleTrack.app
           ln -s /Applications dmg/Applications
-          cp "packaging/How to open PIP-FUCCI the first time.pdf" dmg/
+          cp "packaging/How to open CycleTrack the first time.pdf" dmg/
           for i in 1 2 3; do
-            hdiutil create -volname "PIP-FUCCI" -srcfolder dmg -ov -format UDZO "PIP-FUCCI-${{ matrix.label }}.dmg" && break
+            hdiutil create -volname "CycleTrack" -srcfolder dmg -ov -format UDZO "CycleTrack-${{ matrix.label }}.dmg" && break
             sleep 10
           done
-          test -f "PIP-FUCCI-${{ matrix.label }}.dmg"
+          test -f "CycleTrack-${{ matrix.label }}.dmg"
+          dmg/CycleTrack.app/Contents/MacOS/PIP-FUCCI --whoami
 
       - uses: actions/upload-artifact@v4
         with:
           name: mac-${{ matrix.label }}
           path: |
-            PIP-FUCCI-${{ matrix.label }}.dmg
+            CycleTrack-${{ matrix.label }}.dmg
             PIP-FUCCI-${{ matrix.label }}.app.zip
             PIP-FUCCI-${{ matrix.label }}.app.zip.sha256
 
@@ -153,14 +162,14 @@ jobs:
             echo
             echo "${MSG:-Manual build}"
             echo
-            echo "Installed copies of PIP-FUCCI download this version automatically and switch to it the next time they open."
+            echo "Installed copies download this version automatically; the blue Update now button at the top right switches to it (or it switches the next time the app opens)."
             echo
-            echo "**New install:** Apple menu > About This Mac shows *Apple M…* → **PIP-FUCCI-AppleSilicon.dmg**, *Intel* → **PIP-FUCCI-Intel.dmg**. Open it, drag PIP-FUCCI to Applications, and follow *How to open PIP-FUCCI the first time.pdf* inside. Needs macOS 12 or later."
+            echo "**New install:** Apple menu > About This Mac shows *Apple M…* → **CycleTrack-AppleSilicon.dmg**, *Intel* → **CycleTrack-Intel.dmg**. Open it, drag CycleTrack to Applications, and follow *How to open CycleTrack the first time.pdf* inside. Needs macOS 12 or later. (The PIP-FUCCI-*.app.zip files are for automatic updates.)"
           } > notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
-          name: PIP-FUCCI ${{ needs.version.outputs.version }}
+          name: CycleTrack ${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
           body_path: notes.md
           make_latest: "true"

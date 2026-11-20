@@ -102,13 +102,26 @@ def composite(exp, well: str, field: int, frame: int, layers: set, select_track:
         m = masks_for(exp, well, field)
         cm = m.cells(frame) if m is not None else None
         if cm is not None:
-            full = np.repeat(np.repeat(cm, 2, axis=0), 2, axis=1)[: shape[0], : shape[1]]
-            if full.shape != shape:
-                full = np.pad(full, [(0, shape[0] - full.shape[0]), (0, shape[1] - full.shape[1])], mode="edge")
+            from .pipeline import object_filter
+
+            st = exp.settings
+            lab, sizes, keep = object_filter(cm.astype(bool), st.min_object_um2 / (2 * st.pixel_um) ** 2)
+            kept_h, debris_h = keep[lab], (lab > 0) & ~keep[lab]
+
+            def full(a):
+                f = np.repeat(np.repeat(a, 2, axis=0), 2, axis=1)[: shape[0], : shape[1]]
+                if f.shape != shape:
+                    f = np.pad(f, [(0, shape[0] - f.shape[0]), (0, shape[1] - f.shape[1])], mode="edge")
+                return f
+
+            kept, debris = full(kept_h), full(debris_h)
             tint = np.array([0.35, 0.75, 1.0], np.float32)
-            rgb[full] = rgb[full] * 0.7 + tint * 0.3
-            edge = full & ~ndi.binary_erosion(full, iterations=2)
+            rgb[kept] = rgb[kept] * 0.7 + tint * 0.3
+            edge = kept & ~ndi.binary_erosion(kept, iterations=2)
             rgb[edge] = tint
+            if debris.any():  # ignored as debris: orange outline only
+                dedge = debris & ~ndi.binary_erosion(debris, iterations=2)
+                rgb[dedge] = np.array([1.0, 0.55, 0.15], np.float32)
     if ("masks" in layers or select_track) and exp.has_results:
         m = masks_for(exp, well, field)
         lab = m.labels(frame) if m is not None else None

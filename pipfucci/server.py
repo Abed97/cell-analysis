@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
-from . import APP_NAME, GITHUB_REPO, __version__
+from . import APP_NAME, DISPLAY_NAME, GITHUB_REPO, __version__
 from . import analysis, render
 from .settings import load_json, save_json
 
@@ -95,15 +95,20 @@ class AppState:
             if self.progress.get("running"):
                 raise RuntimeError("Something is already running. Wait for it to finish or cancel it.")
             self.cancel.clear()
+            exp = self.exp
             self.progress = {"running": True, "job": name, "stage": "Starting", "fraction": 0.0, "eta_s": None,
-                             "started": time.time()}
+                             "started": time.time(),
+                             "experiment": (exp.settings.experiment_name or exp.folder.name) if exp else None}
 
         def report(**kw):
             self.progress.update(kw)
 
         def target():
+            from .macos import activity
+
             try:
-                fn(report)
+                with activity("Analysing images"):  # full speed while the window is hidden
+                    fn(report)
                 self.progress.update({"running": False, "fraction": 1.0, "stage": "Done", "error": None,
                                       "finished": time.time()})
             except Exception as e:  # noqa: BLE001
@@ -237,7 +242,7 @@ def state() -> dict:
         except Exception:
             pass
     return {
-        "app": APP_NAME, "version": __version__, "repo": GITHUB_REPO, "platform": sys.platform,
+        "app": APP_NAME, "display_name": DISPLAY_NAME, "version": __version__, "repo": GITHUB_REPO, "platform": sys.platform,
         "native_dialogs": STATE.window is not None or sys.platform == "darwin",
         "cellpose": cellpose_available(),
         "experiment": experiment_state(STATE.exp),
@@ -412,6 +417,15 @@ def run_analysis():
     return {"ok": True}
 
 
+def run_remeasure():
+    exp = need_results()
+    from .updater import load_prefs
+
+    workers = load_prefs().get("workers") or None
+    STATE.start_job("measure", lambda report: exp.remeasure(progress=report, cancel=STATE.cancel, workers=workers))
+    return {"ok": True}
+
+
 def run_retrack():
     exp = need_results()
 
@@ -560,6 +574,11 @@ class Handler(BaseHTTPRequestHandler):
                 r = exp.update_settings(b)
                 if exp.has_results and ("wells" in b or "conditions" in b):
                     exp._build_tracks()
+                if r.get("action") == "remeasure":
+                    try:
+                        run_remeasure()
+                    except RuntimeError:  # something else is running; it is measured on the next run
+                        r["action"] = None
                 return self._json({"result": r, "state": state()})
             if ep == "gates":
                 exp = need_results()

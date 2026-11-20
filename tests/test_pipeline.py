@@ -137,3 +137,93 @@ def test_export_has_colourless_and_figure_data(exp):
 
     cells = pd.read_csv(out / "Cells per frame.csv", nrows=50)
     assert {"phase_call", "position_interpolated"} <= set(cells.columns)
+
+
+def test_colonies_and_debris_filter(exp):
+    from pipfucci import analysis
+    from pipfucci.pipeline import object_filter
+
+    m = next(iter(exp.meta["movies"].values()))
+    assert any(n for n in m["colonies"]) and any(a for a in m["colony_area"])
+    # the filter drops small specks only
+    mask = np.zeros((60, 60), bool)
+    mask[5:25, 5:25] = True  # 400 px object
+    mask[40:42, 40:42] = True  # 4 px speck
+    lab, sizes, keep = object_filter(mask, 10)
+    assert keep.sum() == 1 and sizes[keep][0] == 400
+    before = analysis.population(exp)["conditions"][0]
+    r = exp.update_settings({"min_object_um2": 5000})
+    assert r["action"] == "remeasure" and exp.stale is None
+    exp.remeasure()
+    after = analysis.population(exp)["conditions"][0]
+    n0 = np.nanmean([v for v in before["colonies"]["mean"] if v is not None])
+    n1 = np.nanmean([v for v in after["colonies"]["mean"] if v is not None] or [0])
+    c0 = np.nanmean([v for v in before["confluence"]["mean"] if v is not None])
+    c1 = np.nanmean([v for v in after["confluence"]["mean"] if v is not None] or [0])
+    assert n1 < n0 and c1 <= c0
+    exp.update_settings({"min_object_um2": 50})
+    exp.remeasure()
+
+
+def test_cancelled_rerun_keeps_previous_masks(exp):
+    import threading
+
+    from pipfucci.experiment import Cancelled
+
+    mdir = exp.results_dir / "masks"
+    before = sorted(p.name for p in mdir.rglob("*.npz"))
+    cancel = threading.Event()
+    seen = {"n": 0}
+
+    def progress(**kw):
+        if kw.get("stage") == "Segmenting" and kw.get("done", 0) >= 3:
+            cancel.set()
+
+    with pytest.raises(Cancelled):
+        exp.run(progress=progress, cancel=cancel, workers=1)
+    assert sorted(p.name for p in mdir.rglob("*.npz")) == before
+    assert not (exp.results_dir / "masks.new").exists()
+    from pipfucci import render
+
+    w, f = exp.tracks.iloc[0]["well"], int(exp.tracks.iloc[0]["field"])
+    render._masks.clear()
+    assert render.masks_for(exp, w, f).cells(3) is not None
+
+
+def _square(job):
+    return job["x"] * job["x"]
+
+
+def test_worker_pool_job_error_is_reported():
+    import threading
+
+    from pipfucci.experiment import WorkerPool
+
+    with WorkerPool(2) as pool:
+        assert pool.map(_square, [{"x": i} for i in range(5)], threading.Event()) == [0, 1, 4, 9, 16]
+    with pytest.raises(KeyError):
+        with WorkerPool(2) as pool:
+            pool.map(_square, [{"x": 1}, {"y": 2}], threading.Event())
+
+
+def _die_once(job):
+    import os
+
+    from pathlib import Path
+
+    marker = Path(job["marker"])
+    if job["x"] == 2 and not marker.exists():
+        marker.write_text("x")
+        os._exit(1)  # like a worker killed for running out of memory
+    return job["x"] * 10
+
+
+def test_worker_pool_survives_a_dead_worker(tmp_path):
+    import threading
+
+    from pipfucci.experiment import WorkerPool
+
+    jobs = [{"x": i, "marker": str(tmp_path / "died")} for i in range(6)]
+    with WorkerPool(4) as pool:
+        assert pool.map(_die_once, jobs, threading.Event()) == [0, 10, 20, 30, 40, 50]
+    assert (tmp_path / "died").exists()
