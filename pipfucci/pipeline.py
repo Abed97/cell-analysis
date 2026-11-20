@@ -1,6 +1,10 @@
-"""Per-movie processing (one well/field): load, background, segment, quantify, register, track.
+"""Processing in two stages, both able to run in worker processes.
 
-``process_movie`` is a top-level function so it can run in worker processes.
+1. ``segment_chunk``: a few consecutive frames of one movie: load, top-hat background removal,
+   nuclear segmentation, quantification, whole-cell mask (phase contrast), frame-to-frame drift.
+   Chunks of every movie are spread over all cores, so even a single long movie is parallel.
+2. ``track_job``: one movie: registration, tracking (gap closing, divisions, colourless
+   stretches), and intensity measurements for the filled-in colourless positions.
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ from . import io_incucyte as io
 from . import segment as seg
 from .track import track_movie
 
+DET_KEYS = ("frame", "label", "x", "y", "area", "red", "green", "red_med", "green_med", "edge")
+
 
 def display_range(img: np.ndarray | None):
     if img is None:
@@ -26,40 +32,89 @@ def display_range(img: np.ndarray | None):
     return [float(lo), float(hi)]
 
 
-def process_movie(job: dict) -> dict:
-    """job: {movie, frames: {frame: {channel: path}}, settings: dict(derived numbers), mask_path, progress_q}"""
-    t_start = time.time()
+def _put(zf, name, arr):
+    buf = _io.BytesIO()
+    np.save(buf, arr)
+    zf.writestr(name, buf.getvalue())
+
+
+class MovieMasks:
+    """Labels and whole-cell masks of one movie, stored as chunk files of lazily loaded arrays."""
+
+    def __init__(self, path: Path):
+        self.files = {}
+        path = Path(path)
+        if path.is_dir():
+            sources = sorted(path.glob("*.npz"))
+        elif path.with_suffix(".npz").exists():  # results from before chunking
+            sources = [path.with_suffix(".npz")]
+        else:
+            sources = []
+        self._open = {}
+        for src in sources:
+            try:
+                with zipfile.ZipFile(src) as z:
+                    for name in z.namelist():
+                        self.files[name[:-4]] = src
+            except Exception:
+                continue
+
+    def _get(self, key):
+        src = self.files.get(key)
+        if src is None:
+            return None
+        z = self._open.get(src)
+        if z is None:
+            z = self._open[src] = np.load(src)
+        return z[key]
+
+    def labels(self, frame: int):
+        return self._get(f"f{frame}")
+
+    def cells(self, frame: int):
+        m = self._get(f"c{frame}")
+        return None if m is None else m.astype(bool)
+
+
+def segment_chunk(job: dict) -> dict:
+    """job: movie, frames [f...], paths {f: {channel: path}}, prev {channel: path} | None,
+    settings, mask_path, conf_thr, progress_q."""
+    t0 = time.time()
     s = job["settings"]
     nucleus_px = s["nucleus_px"]
-    frames = sorted(job["frames"].keys())
-    det = {k: [] for k in ("frame", "label", "x", "y", "area", "red", "green", "red_med", "green_med", "edge")}
-    conf = []
-    shifts = [(0.0, 0.0)]
-    mask_path = Path(job["mask_path"])
-    mask_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_mask = mask_path.with_suffix(".tmp")
-    # masks are written frame by frame (lazy-loadable .npz) so memory stays flat on long movies
-    zf = zipfile.ZipFile(tmp_mask, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1)
-    conf_thr = None
-    prev_reg = None
+    bg_r = s.get("bg_radius_px", nucleus_px)
+    det = {k: [] for k in DET_KEYS}
+    steps, conf = {}, {}
     ranges = {}
     shape = None
-    cum = np.zeros(2)
-    for k, f in enumerate(frames):
-        paths = job["frames"][f]
+    mask_path = Path(job["mask_path"])
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = mask_path.with_suffix(".tmp")
+    zf = zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1)
+
+    def reg_image(paths):
+        ph = io.read_channel(paths.get("phase"))
+        if ph is not None:
+            return ph
+        r = seg.bg_subtract(io.read_channel(paths.get("red")), bg_r)
+        g = seg.bg_subtract(io.read_channel(paths.get("green")), bg_r)
+        return np.nan_to_num(r if g is None else (g if r is None else r + g))
+
+    prev_reg = reg_image(job["prev"]) if job.get("prev") else None
+    for k, f in enumerate(job["frames"]):
+        paths = job["paths"][f]
         red = io.read_channel(paths.get("red"))
         green = io.read_channel(paths.get("green"))
         phase = io.read_channel(paths.get("phase"))
         if red is None and green is None:
-            raise ValueError(f"Frame {f} of {job['movie']} has no red or green image")
-        if k == 0 or k == len(frames) // 2:
-            for name, im in (("red", red), ("green", green), ("phase", phase)):
-                r = display_range(im)
-                if r is not None:
-                    old = ranges.get(name)
-                    ranges[name] = r if old is None else [min(old[0], r[0]), max(old[1], r[1])]
-        r_bg = seg.bg_subtract(red, nucleus_px)
-        g_bg = seg.bg_subtract(green, nucleus_px)
+            raise ValueError(f"Frame {f} of {job['movie'][0]} field {job['movie'][1]} has no red or green image")
+        r_bg = seg.bg_subtract(red, bg_r)
+        g_bg = seg.bg_subtract(green, bg_r)
+        if k == 0:
+            for name, im in (("red", r_bg), ("green", g_bg), ("phase", phase)):
+                rr = display_range(im)
+                if rr is not None:
+                    ranges[name] = rr
         if s.get("method") == "cellpose" and seg.cellpose_available():
             labels = seg.segment_cellpose(r_bg, g_bg, nucleus_px)
         else:
@@ -68,62 +123,148 @@ def process_movie(job: dict) -> dict:
         q = seg.quantify(labels, r_bg, g_bg, s["edge_margin_px"])
         nq = len(q["label"])
         det["frame"].append(np.full(nq, f, dtype=np.int32))
-        for key in ("label", "x", "y", "area", "red", "green", "red_med", "green_med", "edge"):
+        for key in DET_KEYS[1:]:
             det[key].append(np.asarray(q[key]))
-        c, conf_thr = seg.confluence(phase, nucleus_px, conf_thr)
-        conf.append(c)
-        reg_img = phase if phase is not None else (np.nan_to_num(r_bg) + np.nan_to_num(g_bg) if r_bg is not None and g_bg is not None else (r_bg if r_bg is not None else g_bg))
+        c, _, cmask = seg.confluence(phase, nucleus_px, job.get("conf_thr"), nuclei=labels)
+        conf[f] = c
+        reg = phase if phase is not None else np.nan_to_num(r_bg if g_bg is None else (g_bg if r_bg is None else r_bg + g_bg))
         if prev_reg is not None:
-            dy, dx = seg.drift(prev_reg, reg_img)
-            cum = cum + np.array([dy, dx])
-            shifts.append((float(cum[0]), float(cum[1])))
-        prev_reg = reg_img
-        buf = _io.BytesIO()
-        np.save(buf, labels.astype(np.uint16 if labels.max() < 65535 else np.uint32))
-        zf.writestr(f"f{f}.npy", buf.getvalue())
+            steps[f] = seg.drift(prev_reg, reg)
+        prev_reg = reg
+        _put(zf, f"f{f}.npy", labels.astype(np.uint16 if labels.max() < 65535 else np.uint32))
+        if cmask is not None:
+            _put(zf, f"c{f}.npy", cmask.astype(np.uint8))
         q_ = job.get("progress_q")
         if q_ is not None:
             try:
                 q_.put(1)
             except Exception:
                 pass
-
-    cat = {k: (np.concatenate(v) if v else np.zeros(0)) for k, v in det.items()}
-    # registration: drift is small and global; remove large jumps that are likely failures
-    sh = np.array(shifts)
-    if len(sh) > 1:
-        steps = np.diff(sh, axis=0)
-        bad = np.hypot(steps[:, 0], steps[:, 1]) > 0.5 * min(shape) if shape else np.zeros(len(steps), bool)
-        steps[bad] = 0
-        sh = np.vstack([[0, 0], np.cumsum(steps, axis=0)])
-    fidx = {f: i for i, f in enumerate(frames)}
-    if cat["frame"].size:
-        rows = np.array([fidx[int(f)] for f in cat["frame"]])
-        xr = cat["x"] - sh[rows, 1]
-        yr = cat["y"] - sh[rows, 0]
-    else:
-        xr = yr = np.zeros(0)
-
     zf.close()
-    tmp_mask.replace(mask_path)
+    tmp.replace(mask_path)
+    cat = {k: (np.concatenate(v) if v else np.zeros(0)) for k, v in det.items()}
+    return {"movie": job["movie"], "frames": list(job["frames"]), "det": cat, "steps": steps, "conf": conf,
+            "ranges": ranges, "shape": list(shape) if shape else None, "seconds": time.time() - t0}
 
+
+def _local_signal(img: np.ndarray, x: float, y: float, r: float) -> float:
+    """Mean in a disk minus the median of a surrounding ring (local background)."""
+    h, w = img.shape
+    R = int(np.ceil(r * 2.6)) + 1
+    xi, yi = int(round(x)), int(round(y))
+    x0, x1, y0, y1 = max(0, xi - R), min(w, xi + R + 1), max(0, yi - R), min(h, yi + R + 1)
+    if x0 >= x1 or y0 >= y1:
+        return np.nan
+    win = img[y0:y1, x0:x1]
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    d2 = (xx - x) ** 2 + (yy - y) ** 2
+    inner = win[d2 <= r * r]
+    ring = win[(d2 >= (1.6 * r) ** 2) & (d2 <= (2.6 * r) ** 2)]
+    if inner.size == 0 or ring.size == 0:
+        return np.nan
+    return float(inner.mean() - np.median(ring))
+
+
+def track_job(job: dict) -> dict:
+    """job: movie, frames, det (arrays), steps {f: (dy, dx)}, conf {f: c}, shape, settings,
+    mask_dir, paths {f: {channel: path}}, ranges."""
+    t0 = time.time()
+    s = job["settings"]
+    nucleus_px = s["nucleus_px"]
+    frames = sorted(job["frames"])
+    shape = job["shape"]
+    cat = job["det"]
+    # cumulative drift; drop implausible jumps (failed registration)
+    sh = {frames[0]: (0.0, 0.0)}
+    cy = cx = 0.0
+    lim = 0.25 * min(shape) if shape else 1e9
+    for f in frames[1:]:
+        dy, dx = job["steps"].get(f, (0.0, 0.0))
+        if np.hypot(dy, dx) > lim:
+            dy = dx = 0.0
+        cy, cx = cy + dy, cx + dx
+        sh[f] = (cy, cx)
+    shy = np.array([sh[int(f)][0] for f in cat["frame"]]) if cat["frame"].size else np.zeros(0)
+    shx = np.array([sh[int(f)][1] for f in cat["frame"]]) if cat["frame"].size else np.zeros(0)
+    xr = cat["x"] - shx
+    yr = cat["y"] - shy
+
+    masks = MovieMasks(job["mask_dir"])
+    cache = {}
+
+    def present(t, x, y):
+        m = cache.get(t)
+        if m is None:
+            m = masks.cells(t)
+            cache[t] = m if m is not None else False
+        if m is False or m is None:
+            return False
+        ys, xs = sh.get(t, (0.0, 0.0))
+        xi, yi = int((x + xs) / 2), int((y + ys) / 2)
+        if 0 <= yi < m.shape[0] and 0 <= xi < m.shape[1]:
+            return bool(m[yi, xi])
+        return False
+
+    has_cells = any(k.startswith("c") for k in masks.files)
     tr = track_movie(cat["frame"].astype(np.int64), np.stack([xr, yr], axis=1) if xr.size else np.zeros((0, 2)),
                      cat["red"], cat["green"], cat["area"], s["search_radius_px"], s["max_gap_frames"],
-                     s["daughter_radius_px"], nucleus_px, s.get("min_cycle_frames", 4))
+                     s["daughter_radius_px"], nucleus_px, s.get("min_cycle_frames", 4),
+                     colourless_frames=s.get("colourless_frames", 0) if has_cells else 0,
+                     present=present if has_cells else None, last_frame=frames[-1])
+
+    # measure the filled-in colourless positions (local background, like the top-hat)
+    virt = tr["virtual"]
+    vrows = {k: [] for k in DET_KEYS}
+    vtid, vxr, vyr = [], [], []
+    if virt:
+        by_f = {}
+        for sid, f, x, y in virt:
+            by_f.setdefault(int(f), []).append((sid, x, y))
+        h, w = shape
+        margin = s["edge_margin_px"]
+        for f, pts in sorted(by_f.items()):
+            paths = job["paths"].get(f, {})
+            red = io.read_channel(paths.get("red"))
+            green = io.read_channel(paths.get("green"))
+            ys, xs = sh.get(f, (0.0, 0.0))
+            for sid, x, y in pts:
+                xi, yi = x + xs, y + ys
+                vrows["frame"].append(f)
+                vrows["label"].append(0)
+                vrows["x"].append(xi)
+                vrows["y"].append(yi)
+                vrows["area"].append(np.nan)
+                rv = _local_signal(red, xi, yi, nucleus_px / 2) if red is not None else np.nan
+                gv = _local_signal(green, xi, yi, nucleus_px / 2) if green is not None else np.nan
+                vrows["red"].append(rv)
+                vrows["green"].append(gv)
+                vrows["red_med"].append(rv)
+                vrows["green_med"].append(gv)
+                vrows["edge"].append(xi < margin or yi < margin or xi > w - 1 - margin or yi > h - 1 - margin)
+                vtid.append(sid)
+                vxr.append(x)
+                vyr.append(y)
+    n_real = len(cat["frame"])
+    out = {}
+    for k in DET_KEYS:
+        v = np.asarray(vrows[k]) if vrows[k] else np.zeros(0)
+        out[k] = np.concatenate([np.asarray(cat[k]), v.astype(np.asarray(cat[k]).dtype if cat[k].size else v.dtype)])
+    interp = np.concatenate([np.zeros(n_real, bool), np.ones(len(vtid), bool)])
     return {
         "movie": job["movie"],
-        "det": cat,
-        "x_reg": xr.astype(np.float32),
-        "y_reg": yr.astype(np.float32),
-        "track_id": tr["track_id"],
+        "det": out,
+        "interp": interp,
+        "x_reg": np.concatenate([xr, np.asarray(vxr, dtype=float)]).astype(np.float32),
+        "y_reg": np.concatenate([yr, np.asarray(vyr, dtype=float)]).astype(np.float32),
+        "track_id": np.concatenate([tr["track_id"], np.asarray(vtid, dtype=np.int64)]),
         "parent": tr["parent"],
         "low_conf": sorted(tr["low_conf"]),
         "frames": frames,
-        "confluence": conf,
-        "shifts": sh.tolist(),
-        "ranges": ranges,
-        "shape": list(shape) if shape else None,
-        "seconds": time.time() - t_start,
+        "confluence": [job["conf"].get(f) for f in frames],
+        "shifts": [list(sh[f]) for f in frames],
+        "ranges": job["ranges"],
+        "shape": shape,
+        "seconds": time.time() - t0,
     }
 
 

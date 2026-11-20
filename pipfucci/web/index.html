@@ -19,6 +19,7 @@
       <button type="button" class="step" data-view="viewer"><span class="num">2</span>Segment &amp; gate</button>
       <button type="button" class="step" data-view="population"><span class="num">3</span>Population</button>
       <button type="button" class="step" data-view="cells"><span class="num">4</span>Single cells</button>
+      <button type="button" class="step" data-view="figures"><span class="num">5</span>Figures</button>
     </div>
     <div class="side-foot">
       <div class="local">
@@ -27,15 +28,23 @@
       </div>
       <p class="muted small">No account or sign-in. Images and results stay in your own folders.</p>
       <div class="kv small"><span class="muted">Version</span><span class="mono" id="version">–</span></div>
-      <div id="update"></div>
     </div>
   </nav>
   <div class="col">
+    <header class="topbar">
+      <div class="top-left" id="top-left"></div>
+      <div class="top-right">
+        <span class="saved" id="saved" hidden></span>
+        <div id="upd-pill"></div>
+        <button type="button" class="icon-btn" id="btn-settings" aria-label="Settings" title="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
+      </div>
+    </header>
     <div id="banner" role="region" aria-label="Update"></div>
     <main id="main" tabindex="-1"></main>
   </div>
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
+<div id="modal" hidden><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title" id="modal-box"></div></div>
 <div id="overlay" hidden><div class="overlay-box"><div class="spinner" aria-hidden="true"></div><strong id="overlay-title">Updating PIP-FUCCI…</strong><span class="muted small" id="overlay-sub">This takes a few seconds. Your experiment stays open.</span></div></div>
 <script src="/static/app.js"></script>
 </body>

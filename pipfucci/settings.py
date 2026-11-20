@@ -16,19 +16,23 @@ class Settings:
     interval_min: float = 60.0
     pixel_um: float = 0.62
     nucleus_um: float = 12.0
-    max_speed_um_h: float = 20.0
+    max_speed_um_h: float = 30.0
     max_gap_h: float = 2.0
+    colourless_h: float = 12.0  # follow cells through stretches with neither reporter on, up to this long
+    bg_radius_um: float | None = None  # top-hat background radius; None = one nucleus diameter
     smoothing_h: float = 1.0
     sensitivity: float = 0.5  # segmentation: 0 = strict, 1 = picks up dim cells
     method: str = "classic"  # "classic" or "cellpose"
     # channel group key -> "phase" | "green" | "red" | "ignore"
     channel_map: dict = field(default_factory=dict)
-    conditions: list = field(default_factory=list)  # [{"id","name","color"}]
+    conditions: list = field(default_factory=list)  # [{"id","name","color","dashed"}]
     wells: dict = field(default_factory=dict)  # well -> condition id
     parental_well: str | None = None
     gate_green: float | None = None  # in normalised units
     gate_red: float | None = None
     experiment_name: str = ""
+    linked: list = field(default_factory=list)  # other analysed experiment folders shown alongside this one
+    styles: dict = field(default_factory=dict)  # figure style per condition name: color, dashed, order, hidden
 
     # ---------- derived ----------
     @property
@@ -41,8 +45,17 @@ class Settings:
 
     @property
     def search_radius_px(self) -> float:
-        # speed x interval / pixel size, never smaller than half a nucleus
-        return max(self.max_speed_um_h * self.interval_h / self.pixel_um, 0.5 * self.nucleus_px)
+        # speed x interval / pixel size, never smaller than one nucleus diameter
+        return max(self.max_speed_um_h * self.interval_h / self.pixel_um, 1.0 * self.nucleus_px)
+
+    @property
+    def bg_radius_px(self) -> float:
+        um = self.bg_radius_um if self.bg_radius_um else self.nucleus_um
+        return max(um / self.pixel_um, 0.75 * self.nucleus_px)
+
+    @property
+    def colourless_frames(self) -> int:
+        return max(0, int(round(self.colourless_h / self.interval_h)))
 
     @property
     def daughter_radius_px(self) -> float:
@@ -79,6 +92,9 @@ class Settings:
             "search_radius_px": round(self.search_radius_px, 1),
             "daughter_radius_px": round(self.daughter_radius_px, 1),
             "max_gap_frames": self.max_gap_frames,
+            "colourless_frames": self.colourless_frames,
+            "bg_radius_px": round(self.bg_radius_px, 1),
+            "bg_radius_um": round(self.bg_radius_px * self.pixel_um, 1),
             "smoothing_frames": self.smoothing_frames,
             "precision_min": self.interval_min,
             "division_rule": (
@@ -130,11 +146,23 @@ class Settings:
         pos("nucleus_um", 1.0, 12.0)
         pos("max_speed_um_h", 0.1, 20.0)
         pos("max_gap_h", 0.0, 2.0)
+        pos("colourless_h", 0.0, 12.0)
+        if self.bg_radius_um is not None:
+            try:
+                v = float(self.bg_radius_um)
+                self.bg_radius_um = v if math.isfinite(v) and v > 0 else None
+            except Exception:
+                self.bg_radius_um = None
         pos("smoothing_h", 0.0, 1.0)
         try:
             self.sensitivity = float(min(1.0, max(0.0, float(self.sensitivity))))
         except Exception:
             self.sensitivity = 0.5
+        if not isinstance(self.styles, dict):
+            self.styles = {}
+        if not isinstance(self.linked, list):
+            self.linked = []
+        self.linked = [str(p) for p in dict.fromkeys(self.linked) if isinstance(p, str) and p]
         if self.method not in ("classic", "cellpose"):
             self.method = "classic"
         for gate in ("gate_green", "gate_red"):

@@ -30,7 +30,7 @@ from pathlib import Path
 from . import APP_NAME, GITHUB_REPO, __version__
 
 EXE_REL = Path("Contents") / "MacOS" / APP_NAME
-CHECK_EVERY_S = 30 * 60
+CHECK_EVERY_S = 15 * 60
 _NAME = re.compile(r"^PIP-FUCCI-(\d+(?:\.\d+)*)\.app$")
 
 
@@ -73,6 +73,39 @@ def installed_versions() -> list[tuple[str, Path]]:
             out.append((m.group(1), p))
     out.sort(key=lambda x: vt(x[0]), reverse=True)
     return out
+
+
+PREFS_DEFAULT = {"auto_check": True, "auto_install": True, "workers": 0}
+
+
+def load_prefs() -> dict:
+    """App preferences (not per experiment): updates and processing cores."""
+    try:
+        d = json.loads((support_dir() / "prefs.json").read_text())
+    except Exception:
+        d = {}
+    out = dict(PREFS_DEFAULT)
+    for k, v in d.items():
+        if k in out and isinstance(v, type(out[k])):
+            out[k] = v
+    return out
+
+
+def save_prefs(patch: dict) -> dict:
+    cur = load_prefs()
+    for k, v in (patch or {}).items():
+        if k in ("auto_check", "auto_install"):
+            cur[k] = bool(v)
+        elif k == "workers":
+            try:
+                cur[k] = max(0, min(64, int(v)))
+            except Exception:
+                pass
+    p = support_dir() / "prefs.json"
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cur, indent=1))
+    tmp.replace(p)
+    return cur
 
 
 def _state_path() -> Path:
@@ -175,6 +208,8 @@ def maybe_launch_newer(argv: list[str]) -> None:
     """Called first thing at startup: if a newer downloaded version exists, become it."""
     if not enabled() or "--selftest" in argv or os.environ.get("PIPFUCCI_LAUNCHED"):
         return
+    if not load_prefs().get("auto_install", True):  # she installs from the "Update now" button
+        return
     st = load_state()
     bad = set(st.get("bad", []))
     attempts = st.setdefault("attempts", {})
@@ -258,12 +293,16 @@ class Updater:
     def __init__(self):
         self.lock = threading.Lock()
         self.status = {"enabled": enabled(), "state": "idle", "current": __version__, "latest": None,
-                       "ready_version": None, "progress": 0.0, "message": None, "just_updated": None}
+                       "ready_version": None, "progress": 0.0, "message": None, "just_updated": None,
+                       "checked_at": None}
         self._thread = None
         self.stopped = False
+        self.wake = threading.Event()
+        self.force = False
 
     def stop(self) -> None:
         self.stopped = True
+        self.wake.set()
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -275,23 +314,38 @@ class Updater:
         with self.lock:
             self.status.update(kw)
 
-    def start(self, delay: float = 8.0) -> None:
+    def start(self, delay: float = 3.0) -> None:
         if not self.status["enabled"] or self._thread:
             return
+        if self.status["state"] == "idle":  # a version downloaded earlier shows at once
+            for ver, _ in installed_versions():
+                if vt(ver) > vt(__version__) and ver not in set(load_state().get("bad", [])):
+                    self._set(state="ready", ready_version=ver, latest=ver)
+                break
         self._thread = threading.Thread(target=self._loop, args=(delay,), daemon=True)
         self._thread.start()
 
+    def check_now(self) -> None:
+        """"Check for updates" from the settings: runs even when automatic checks are off."""
+        self.force = True
+        self.wake.set()
+
     def _loop(self, delay):
-        time.sleep(delay)
+        self.wake.wait(delay)
         while not self.stopped:
-            try:
-                self.check_and_download()
-            except Exception as e:  # noqa: BLE001 - never let updates break the app
-                self._set(state="error", message=str(e))
-            for _ in range(int(CHECK_EVERY_S)):
-                if self.stopped:
-                    return
-                time.sleep(1)
+            self.wake.clear()
+            force, self.force = self.force, False
+            if force or load_prefs().get("auto_check", True):
+                try:
+                    self.check_and_download()
+                except Exception as e:  # noqa: BLE001 - never let updates break the app
+                    rv = self.status.get("ready_version")
+                    still = bool(rv) and (versions_dir() / f"{APP_NAME}-{rv}.app" / EXE_REL).is_file()
+                    self._set(state="ready" if still else "error", message=str(e))
+                self._set(checked_at=time.time())
+            elif self.status["state"] not in ("ready",):
+                self._set(state="off")
+            self.wake.wait(CHECK_EVERY_S)
 
     def check_and_download(self) -> None:
         """One check, with a lock so two running copies never download at the same time."""
@@ -310,7 +364,8 @@ class Updater:
                 fcntl.flock(lk, fcntl.LOCK_UN)
 
     def _check_and_download(self) -> None:
-        self._set(state="checking", message=None)
+        if self.status["state"] != "ready":
+            self._set(state="checking", message=None)
         with _get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest") as r:
             rel = json.loads(r.read().decode())
         latest = str(rel.get("tag_name", "")).lstrip("v")

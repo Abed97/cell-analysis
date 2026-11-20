@@ -38,10 +38,13 @@ def evaluate(exp, gt_path) -> dict:
     inside = (gt.x > m) & (gt.x < w - m) & (gt.y > m) & (gt.y < h - m)
     gt = gt[inside].copy()
     mt = match(exp, gt)
-    vis = mt[mt.silent == 0]
+    vis = mt[(mt.silent == 0) & (mt.get("colourless", 0) == 0)] if "colourless" in mt else mt[mt.silent == 0]
     recall = float((vis.det >= 0).mean())
-    n_det = len(exp.cells[(exp.cells.x > m) & (exp.cells.x < w - m) & (exp.cells.y > m) & (exp.cells.y < h - m)])
-    precision = float((vis.det >= 0).sum() / max(1, n_det))
+    real = exp.cells[~exp.cells["interp"]] if "interp" in exp.cells else exp.cells
+    n_det = len(real[(real.x > m) & (real.x < w - m) & (real.y > m) & (real.y < h - m)])
+    real_hits = mt[(mt.det >= 0)]
+    real_hits = real_hits[~exp.cells.loc[real_hits.det.values, "interp"].values] if "interp" in exp.cells else real_hits
+    precision = float(len(real_hits) / max(1, n_det))
     hit = vis[vis.det >= 0]
     det = exp.cells.loc[hit.det.values]
     truth = hit.phase.map(GT_PHASE).values
@@ -75,7 +78,24 @@ def evaluate(exp, gt_path) -> dict:
     div_recall = found / max(1, total)
     n_div_detected = len(set(parents.values()))
     n_div_true = gt[gt.parent > 0].groupby(["well", "field"]).parent.nunique().sum()
+    # completeness: share of each cell's life (inside the field) carried by its single best track,
+    # counting colourless frames too (the cell is there; it just has no colour)
+    allm = mt.copy()
+    allm["track"] = None
+    hit_all = allm[allm.det >= 0]
+    allm.loc[hit_all.index, "track"] = exp.cells.loc[hit_all.det.values, "track"].values
+    comp = []
+    for (well, fld, cell), g in allm.groupby(["well", "field", "cell"]):
+        if g.silent.max() or len(g) < 6:
+            continue
+        best = g.track.dropna().value_counts()
+        comp.append((best.iloc[0] if len(best) else 0) / len(g))
+    completeness = float(np.mean(comp)) if comp else 0.0
+    cl = mt[mt.get("colourless", 0) == 1] if "colourless" in mt else mt.iloc[0:0]
+    cl_found = float((cl.det >= 0).mean()) if len(cl) else float("nan")
     return {
+        "track_completeness": round(completeness, 3),
+        "colourless_frames_found": round(cl_found, 3) if cl_found == cl_found else None,
         "seg_recall": round(recall, 3), "seg_precision": round(precision, 3),
         "phase_raw_acc": round(raw_acc, 3), "phase_raw_acc_assigned": round(raw_acc_assigned, 3),
         "phase_smoothed_acc": round(smooth_acc, 3),

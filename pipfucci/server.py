@@ -143,7 +143,84 @@ def experiment_state(exp) -> dict:
         "results_dir": str(exp.results_dir),
         "run": exp.meta.get("run", {}).get("finished") if exp.has_results else None,
         "floor": exp.meta.get("floor"),
+        "linked": linked_info(exp),
+        "saved_at": _saved_at(exp),
     }
+
+
+def _saved_at(exp):
+    try:
+        return time.strftime("%H:%M", time.localtime((exp.results_dir / "experiment.json").stat().st_mtime))
+    except OSError:
+        return None
+
+
+# ------------------------------------------------------------------ other experiments to compare with
+_LINKED: dict = {}
+
+
+def _stamp(folder: Path) -> tuple:
+    rd = folder / "PIP-FUCCI results"
+    out = []
+    for n in ("experiment.json", "cells.pkl", "tracks.pkl", "track_flags.json"):
+        try:
+            out.append((rd / n).stat().st_mtime)
+        except OSError:
+            out.append(0)
+    return tuple(out)
+
+
+def load_linked(path: str):
+    """An analysed experiment, read-only, cached until its files change."""
+    from .experiment import Experiment
+
+    p = Path(path)
+    if not (p / "PIP-FUCCI results" / "cells.pkl").exists():
+        return None
+    st = _stamp(p)
+    hit = _LINKED.get(str(p))
+    if hit and hit[0] == st:
+        return hit[1]
+    try:
+        e = Experiment(p)
+    except Exception:
+        return None
+    if not e.has_results:
+        return None
+    _LINKED[str(p)] = (st, e)
+    return e
+
+
+def linked_info(exp) -> list:
+    out = []
+    for p in exp.settings.linked:
+        e = load_linked(p)
+        if e is None:
+            out.append({"folder": p, "name": Path(p).name, "ok": False,
+                        "msg": "Folder not analysed yet" if Path(p).is_dir() else "Folder not found (moved or renamed?)"})
+            continue
+        conds = [c["name"] for c in analysis._conditions(e)]
+        out.append({"folder": p, "name": e.settings.experiment_name or e.folder.name, "ok": True,
+                    "conditions": conds, "n_wells": len(e.index["wells"]), "interval_min": e.settings.interval_min})
+    return out
+
+
+def all_exps(exp) -> list:
+    return [exp] + [e for e in (load_linked(p) for p in exp.settings.linked) if e is not None]
+
+
+def link_experiment(path: str) -> dict:
+    exp = need_exp()
+    p = Path(path).expanduser().resolve()
+    if p == exp.folder:
+        raise ValueError("That is the experiment that is already open.")
+    if not p.is_dir():
+        raise ValueError(f"Folder not found: {p}")
+    if load_linked(str(p)) is None:
+        raise ValueError("That folder has not been analysed yet. Open it, run the analysis, then add it here.")
+    if str(p) not in exp.settings.linked:
+        exp.update_settings({"linked": exp.settings.linked + [str(p)]})
+    return state()
 
 
 def state() -> dict:
@@ -283,6 +360,30 @@ def update_now() -> dict:
     return {"url": f"http://127.0.0.1:{port}/", "version": ver}
 
 
+def save_figure(b: dict) -> dict:
+    import base64
+    import re
+
+    exp = need_results()
+    name = re.sub(r"[^A-Za-z0-9 _().+-]+", "_", str(b.get("name") or "figure")).strip() or "figure"
+    out = exp.results_dir / "figures"
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d %H%M%S")
+    written = []
+    if b.get("svg"):
+        p = out / f"{name} {stamp}.svg"
+        p.write_text(b["svg"], encoding="utf-8")
+        written.append(p)
+    if b.get("png"):
+        data = b["png"].split(",", 1)[-1]
+        p = out / f"{name} {stamp}.png"
+        p.write_bytes(base64.b64decode(data))
+        written.append(p)
+    if not written:
+        raise ValueError("Nothing to save.")
+    return {"path": str(written[-1]), "folder": str(out)}
+
+
 def need_exp():
     if STATE.exp is None:
         raise ValueError("Open an experiment folder first.")
@@ -299,8 +400,12 @@ def need_results():
 def run_analysis():
     exp = need_exp()
 
+    from .updater import load_prefs
+
+    workers = load_prefs().get("workers") or None
+
     def job(report):
-        exp.run(progress=report, cancel=STATE.cancel)
+        exp.run(progress=report, cancel=STATE.cancel, workers=workers)
 
     STATE.start_job("analysis", job)
     return {"ok": True}
@@ -347,8 +452,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        for k, v in (extra or {}).items():
+        for k, v in {"Cache-Control": "no-store", **(extra or {})}.items():
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
@@ -384,7 +488,9 @@ class Handler(BaseHTTPRequestHandler):
                 exp = need_exp()
                 layers = set((q.get("layers") or "phase,red,green,masks").split(","))
                 arr = render.composite(exp, q["well"], int(q["field"]), int(q["frame"]), layers, q.get("sel") or None)
-                return self._send(200, render.encode(arr, "JPEG", 88), "image/jpeg")
+                # cacheable: the page puts a version in the address that changes with gates and results
+                return self._send(200, render.encode(arr, "JPEG", 88), "image/jpeg",
+                                  {"Cache-Control": "private, max-age=900"})
             if ep == "montage":
                 exp = need_results()
                 arr, _ = render.montage(exp, q["key"])
@@ -397,7 +503,22 @@ class Handler(BaseHTTPRequestHandler):
                 exp = need_results()
                 return self._json(analysis.detection_stats(exp, q["well"], int(q["field"]), int(q["frame"])))
             if ep == "population":
-                return self._json(analysis.population(need_results()))
+                from . import compare
+
+                return self._json(compare.population(all_exps(need_results())))
+            if ep == "figures":
+                from . import compare
+
+                return self._json(compare.figures(all_exps(need_results())))
+            if ep == "frame_cells":
+                exp = need_results()
+                return self._json(analysis.frame_cells(exp, q["well"], int(q["field"]), int(q["frame"])))
+            if ep == "lineage":
+                return self._json(analysis.lineage(need_results(), q["key"]))
+            if ep == "prefs":
+                from .updater import load_prefs
+
+                return self._json({**load_prefs(), "cpus": os.cpu_count() or 1})
             if ep == "tracks":
                 exp = need_results()
                 return self._json(analysis.tracks_overview(exp, q.get("condition") or None, q.get("well") or None,
@@ -466,13 +587,34 @@ class Handler(BaseHTTPRequestHandler):
             if ep == "export":
                 from .export import export_all
 
-                out = export_all(need_results())
+                exp = need_results()
+                out = export_all(exp, all_exps(exp)[1:])
                 return self._json({"path": str(out)})
             if ep == "reveal":
                 reveal(b.get("path") or str(need_exp().results_dir))
                 return self._json({"ok": True})
             if ep == "update_now":
                 return self._json(update_now())
+            if ep == "prefs":
+                from .updater import save_prefs
+
+                return self._json({**save_prefs(b), "cpus": os.cpu_count() or 1})
+            if ep == "check_updates":
+                from .updater import UPDATER
+
+                if not UPDATER.status["enabled"]:
+                    STATE.update_info = None
+                    return self._json({**check_update(), "enabled": False})
+                UPDATER.check_now()
+                return self._json({"ok": True})
+            if ep == "link":
+                return self._json(link_experiment(b.get("path", "")))
+            if ep == "unlink":
+                exp = need_exp()
+                exp.update_settings({"linked": [p for p in exp.settings.linked if p != b.get("path")]})
+                return self._json(state())
+            if ep == "save_figure":
+                return self._json(save_figure(b))
             if ep == "restart":
                 from .updater import UPDATER
 

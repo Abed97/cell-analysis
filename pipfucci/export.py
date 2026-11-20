@@ -12,7 +12,7 @@ from . import analysis
 from .experiment import Experiment, run_info
 from .settings import save_json
 
-PH_NAMES = {"G1": "G1", "S": "S", "G2M": "G2-M"}
+PH_NAMES = {"G1": "G1", "S": "S", "G2M": "G2-M", "Colourless": "Colourless"}
 
 
 def _prism_table(exp: Experiment, ws: dict, key: str, col: int | None = None) -> pd.DataFrame:
@@ -30,14 +30,42 @@ def _prism_table(exp: Experiment, ws: dict, key: str, col: int | None = None) ->
     return df
 
 
-def export_all(exp: Experiment) -> Path:
+def _safe(name: str) -> str:
+    import re
+
+    return re.sub(r"[^A-Za-z0-9 _().+-]+", "_", str(name)).strip() or "condition"
+
+
+def export_figure_data(exps: list[Experiment], out: Path) -> None:
+    """The numbers behind the Figures page (cohort composition and per-cell phase durations)."""
+    from . import compare
+
+    fig = compare.figures(exps)
+    fd = out / "Figure data"
+    fd.mkdir(parents=True, exist_ok=True)
+    for c in fig["conditions"]:
+        if not c["n"]:
+            continue
+        df = pd.DataFrame({"Time (h)": fig["hours"]})
+        for k in compare.CAT_NAMES:
+            df[f"{k} (% of cells)"] = np.round(np.asarray(c["composition"][k], dtype=float), 3)
+        df.to_csv(fd / f"Composition {_safe(c['name'])} (n={c['n']}).csv", index=False)
+    for p in analysis.PH:
+        cols = {f"{c['name']} (n={len(c['durations'][p])})": pd.Series(c["durations"][p], dtype=float)
+                for c in fig["conditions"]}
+        pd.DataFrame(cols).to_csv(fd / f"Hours per observed stage {PH_NAMES[p]}.csv", index=False)
+    if len(exps) > 1:
+        (fd / "Experiments included.txt").write_text("\n".join(str(e.folder) for e in exps) + "\n")
+
+
+def export_all(exp: Experiment, others: list | None = None) -> Path:
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     out = exp.results_dir / "exports" / stamp
     prism = out / "Prism tables"
     prism.mkdir(parents=True, exist_ok=True)
     ws = analysis.well_series(exp)
 
-    for i, p in enumerate(analysis.PH):
+    for i, p in enumerate(analysis.CALLS):
         _prism_table(exp, ws, "frac", i).to_csv(prism / f"Phase fraction {PH_NAMES[p]} (%).csv", index=False)
     _prism_table(exp, ws, "count_norm").to_csv(prism / "Cell number (fold of t0).csv", index=False)
     _prism_table(exp, ws, "total").to_csv(prism / "Cell number (detected nuclei).csv", index=False)
@@ -57,7 +85,7 @@ def export_all(exp: Experiment) -> Path:
     pop = analysis.population(exp)
     rows = []
     for c in pop["conditions"]:
-        for metric in ["G1", "S", "G2M", "count_norm", "confluence"]:
+        for metric in ["G1", "S", "G2M", "Colourless", "count_norm", "confluence"]:
             for h, m, s in zip(pop["hours"], c[metric]["mean"], c[metric]["sem"]):
                 rows.append({"condition": c["name"], "metric": metric, "time_h": h, "mean": m, "sem": s,
                              "n_wells": len(c["wells"])})
@@ -68,8 +96,12 @@ def export_all(exp: Experiment) -> Path:
     hours = np.array(exp.frame_hours())
     cells.insert(3, "time_h", np.round(hours[cells["frame"].values], 3))
     cells["condition"] = cells["well"].map(lambda w: (exp.settings.condition_of(w) or {}).get("name", "Unassigned"))
-    cells["phase_call"] = cells["phase"].map({0: "G1", 1: "S", 2: "G2-M"})
+    names = {0: "G1", 1: "S", 2: "G2-M", 3: "Colourless"}
+    cells["phase_call"] = cells["call" if "call" in cells else "phase"].map(names)
+    cells["smoothed_phase"] = cells["phase"].map(names)
     cells["raw_gate_call"] = cells["raw"].map({0: "G1", 1: "S", 2: "G2-M", 3: "dim"})
+    if "interp" in cells:
+        cells["position_interpolated"] = cells.pop("interp").astype(bool)
     parents = exp.meta.get("parents", {})
     cells["parent_track"] = cells["track"].map(parents).fillna("")
     ex = exp.excluded_tracks()
@@ -77,7 +109,7 @@ def export_all(exp: Experiment) -> Path:
     cells = cells.rename(columns={"red": "red_mean_bgcorr", "green": "green_mean_bgcorr", "red_med": "red_median_bgcorr",
                                   "green_med": "green_median_bgcorr", "r_n": "red_normalised", "g_n": "green_normalised",
                                   "x_reg": "x_registered", "y_reg": "y_registered", "edge": "at_field_edge"})
-    cells.drop(columns=["raw", "phase", "tid"], errors="ignore").to_csv(out / "Cells per frame.csv", index=False)
+    cells.drop(columns=["raw", "phase", "call", "tid"], errors="ignore").to_csv(out / "Cells per frame.csv", index=False)
 
     # per track
     t = exp.tracks.copy()
@@ -102,11 +134,14 @@ def export_all(exp: Experiment) -> Path:
     t.index.name = "track"
     t.to_csv(out / "Tracks.csv")
 
+    export_figure_data([exp] + list(others or []), out)
     save_json(out / "Settings and versions.json", run_info(exp))
     (out / "README.txt").write_text(
         "PIP-FUCCI export\n\n"
         "Prism tables/: one column per well, grouped by condition. Paste into a Prism grouped table.\n"
-        "Phase calls are smoothed per track (order G1 -> S -> G2-M enforced). Durations are only for phases\n"
+        "Phase calls are smoothed per track (order G1 -> S -> G2-M enforced). 'Colourless' means neither reporter\n"
+        "was on (typically just after division); those cells are followed on phase contrast and their\n"
+        "position_interpolated rows are not counted as detected nuclei. Durations are only for phases\n"
         f"fully observed inside the movie and carry +/- {ih:g} h (one frame). Cells present at the first frame,\n"
         "ending at the last frame, or at the field edge are censored and left out of durations.\n"
         "Statistics should be run on well means (biological replicates), never on individual cells.\n"

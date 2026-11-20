@@ -47,9 +47,16 @@ def selftest() -> int:
         assert exp.has_results and len(exp.tracks) > 0, "no tracks"
         pop = analysis.population(exp)
         assert pop["conditions"], "no population output"
-        render.encode(render.composite(exp, "B2", 1, 3, {"phase", "red", "green", "masks"}))
+        render.encode(render.composite(exp, "B2", 1, 3, {"phase", "red", "green", "masks", "bgsub", "confluence"}))
+        from . import compare
+
+        fig = compare.figures([exp])
+        assert fig["conditions"] and fig["conditions"][0]["n"] > 0, "no figure data"
+        key = exp.tracks.index[0]
+        assert analysis.lineage(exp, key)["nodes"], "no lineage"
+        assert analysis.frame_cells(exp, "B2", 1, 3)["cells"], "no cells in frame"
         out = export_all(exp)
-        assert (out / "Tracks.csv").exists()
+        assert (out / "Tracks.csv").exists() and (out / "Figure data").is_dir()
         srv, port = serve(0)
         st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=10).read())
         assert st["app"] == "PIP-FUCCI"
@@ -89,7 +96,7 @@ def serve_only(args) -> int:
             open_folder(args.folder)
         except Exception as e:  # noqa: BLE001
             print("could not open", args.folder, e)
-    UPDATER.start(delay=60)
+    UPDATER.start(delay=30)
     if args.ready_file:
         tmp = args.ready_file + ".tmp"
         with open(tmp, "w") as fh:

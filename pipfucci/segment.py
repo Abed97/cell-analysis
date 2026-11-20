@@ -7,26 +7,36 @@ from scipy import ndimage as ndi
 
 
 # ---------------------------------------------------------------- background
-def background(img: np.ndarray, nucleus_px: float) -> np.ndarray:
-    """Smooth background estimate (rolling-ball-like) from a downsampled minimum filter."""
-    step = 4 if min(img.shape) >= 256 else 2
-    small = img[::step, ::step]
-    size = max(3, int(round(2.5 * nucleus_px / step)) | 1)
-    bg = ndi.minimum_filter(small, size=size)
-    bg = ndi.uniform_filter(bg, size=size)
-    bg = ndi.gaussian_filter(bg, sigma=size / 2.0)
-    zoom = (img.shape[0] / bg.shape[0], img.shape[1] / bg.shape[1])
-    bg = ndi.zoom(bg, zoom, order=1)
-    bg = bg[: img.shape[0], : img.shape[1]]
-    if bg.shape != img.shape:  # pad if zoom rounded down
-        bg = np.pad(bg, [(0, img.shape[0] - bg.shape[0]), (0, img.shape[1] - bg.shape[1])], mode="edge")
+def _disk(r: int) -> np.ndarray:
+    y, x = np.ogrid[-r:r + 1, -r:r + 1]
+    return (x * x + y * y) <= r * r
+
+
+def background(img: np.ndarray, radius_px: float) -> np.ndarray:
+    """Top-hat background: grey opening with a disk larger than any nucleus.
+
+    Anything narrower than the disk (nuclei, even big G2 ones) is removed from the estimate;
+    broad structure (uneven green autofluorescence, medium, plastic) stays in it and is then
+    subtracted. Done on a min-pooled copy for speed, so the estimate never rises into a cell.
+    """
+    h, w = img.shape
+    f = 4 if min(h, w) >= 256 else 2
+    H, W = -(-h // f) * f, -(-w // f) * f
+    pad = np.pad(img, [(0, H - h), (0, W - w)], mode="edge") if (H, W) != (h, w) else img
+    small = pad.reshape(H // f, f, W // f, f).min(axis=(1, 3))
+    r = max(2, int(round(radius_px / f)))
+    opened = ndi.grey_opening(small, footprint=_disk(r))
+    opened = ndi.gaussian_filter(opened, sigma=max(1.0, r / 2.0))  # smooth: no structure at cell scale
+    bg = ndi.zoom(opened, (H / opened.shape[0], W / opened.shape[1]), order=1)[:h, :w]
+    if bg.shape != img.shape:
+        bg = np.pad(bg, [(0, h - bg.shape[0]), (0, w - bg.shape[1])], mode="edge")
     return bg
 
 
-def bg_subtract(img: np.ndarray | None, nucleus_px: float) -> np.ndarray | None:
+def bg_subtract(img: np.ndarray | None, radius_px: float) -> np.ndarray | None:
     if img is None:
         return None
-    return img - background(img, nucleus_px)
+    return img - background(img, radius_px)
 
 
 def robust_scale(img: np.ndarray) -> float:
@@ -63,7 +73,9 @@ def segment_classic(red: np.ndarray | None, green: np.ndarray | None, nucleus_px
     mad = max(mad, 1e-4)
     k = 10.0 - 7.0 * float(sensitivity)  # 0.5 -> 6.5 sigma, 1 -> 3 sigma
     thr = med + k * mad
-    thr = max(thr, 0.04)  # nuclei are at least 4% of the bright-cell level
+    # and a contrast floor relative to bright cells, so cell-sized autofluorescence (a green glow
+    # over the cytoplasm) is not taken for nuclei: 16% at the default sensitivity, 4% at the maximum
+    thr = max(thr, 0.04 + 0.24 * (1.0 - float(sensitivity)))
     mask = smooth > thr
     mask = ndi.binary_opening(mask, iterations=1)
     mask = ndi.binary_fill_holes(mask)
@@ -215,16 +227,21 @@ def quantify(labels: np.ndarray, red: np.ndarray | None, green: np.ndarray | Non
 
 
 # ---------------------------------------------------------------- confluence
-def confluence(phase: np.ndarray | None, nucleus_px: float, thr: float | None = None):
-    """Fraction of the field covered by cells, from local texture in phase contrast."""
+def cell_mask(phase: np.ndarray | None, nucleus_px: float, thr: float | None = None, nuclei: np.ndarray | None = None):
+    """Area covered by cells (any colour, or none) from phase contrast, at half resolution.
+
+    Local texture finds cell edges and nuclei; closing and hole filling extend that to whole cell
+    bodies; the fluorescent nuclei are added in case a cell is very flat. Returns (mask, thr).
+    """
     if phase is None:
-        return np.nan, thr
+        if nuclei is None:
+            return None, thr
+        return ndi.binary_dilation(nuclei[::2, ::2] > 0, iterations=max(1, int(nucleus_px / 4))), thr
     img = phase[::2, ::2].astype(np.float32)
-    win = max(3, int(nucleus_px / 2) | 1)
+    win = max(3, int(nucleus_px / 3) | 1)
     m = ndi.uniform_filter(img, win)
     m2 = ndi.uniform_filter(img * img, win)
-    sd = np.sqrt(np.clip(m2 - m * m, 0, None))
-    sd = ndi.gaussian_filter(sd, win / 2)
+    sd = np.log1p(np.sqrt(np.clip(m2 - m * m, 0, None)))
     if thr is None:
         from skimage.filters import threshold_otsu
 
@@ -232,7 +249,22 @@ def confluence(phase: np.ndarray | None, nucleus_px: float, thr: float | None = 
             thr = float(threshold_otsu(sd))
         except Exception:
             thr = float(np.median(sd))
-    return float((sd > thr).mean()), thr
+    mask = sd > thr
+    r = max(1, int(round(nucleus_px / 4)))
+    mask = ndi.binary_closing(mask, structure=_disk(r), iterations=1)
+    mask = ndi.binary_fill_holes(mask)
+    mask = ndi.binary_opening(mask, structure=_disk(max(1, r // 2)))
+    if nuclei is not None:
+        mask |= nuclei[::2, ::2][: mask.shape[0], : mask.shape[1]] > 0
+    return mask, thr
+
+
+def confluence(phase: np.ndarray | None, nucleus_px: float, thr: float | None = None, nuclei=None):
+    """Fraction of the field covered by cells. Returns (fraction, thr, mask)."""
+    mask, thr = cell_mask(phase, nucleus_px, thr, nuclei)
+    if mask is None:
+        return np.nan, thr, None
+    return float(mask.mean()), thr, mask
 
 
 # ---------------------------------------------------------------- registration

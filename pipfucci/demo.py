@@ -26,7 +26,8 @@ def _intensity(phase: str, p: float):
 
 
 class _Cell:
-    __slots__ = ("id", "parent", "x", "y", "ang", "phase", "t", "dur", "arrested", "silent", "bright", "ax", "born")
+    __slots__ = ("id", "parent", "x", "y", "ang", "phase", "t", "dur", "arrested", "silent", "bright", "ax", "born",
+                 "cl", "cl_dur")
 
     def __init__(self, cid, parent, x, y, rng, params, phase="G1", t=0.0, born=0):
         self.id, self.parent, self.x, self.y = cid, parent, x, y
@@ -38,6 +39,9 @@ class _Cell:
         self.ax = rng.uniform(0.75, 0.95)
         self.born = born
         self.dur = _durations(rng, params)
+        # colourless spell at the start of G1 (both reporters below detection); arrested cells may stay colourless
+        self.cl = rng.random() < params.get("colourless", 0.0)
+        self.cl_dur = float(rng.uniform(3.0, 10.0)) if not self.arrested else 1e9
 
 
 def _durations(rng, params):
@@ -71,7 +75,10 @@ def simulate_movie(rng, params, n_frames, interval_h, shape, nucleus_px, n0=55, 
         for c in cells:
             p = 0.5 if c.arrested else min(1.0, c.t / c.dur[c.phase])
             g, r = _intensity(c.phase, p)
-            snap.append((c.id, c.parent, c.x, c.y, c.ang, c.ax, c.phase, g, r, c.silent, c.bright))
+            colourless = bool(c.cl and c.phase == "G1" and (c.arrested or c.t < c.cl_dur))
+            if colourless:
+                g, r = 0.025, 0.02
+            snap.append((c.id, c.parent, c.x, c.y, c.ang, c.ax, c.phase, g, r, c.silent, c.bright, colourless))
         frames.append(snap)
         # advance
         nxt = []
@@ -81,6 +88,7 @@ def simulate_movie(rng, params, n_frames, interval_h, shape, nucleus_px, n0=55, 
             c.x = float(np.clip(c.x + rng.normal(0, step * 0.6), -5, w + 5))
             c.y = float(np.clip(c.y + rng.normal(0, step * 0.6), -5, h + 5))
             if c.arrested:
+                c.t += interval_h
                 nxt.append(c)
                 continue
             c.t += interval_h
@@ -131,18 +139,33 @@ def _repel(cells, dmin, iters=6):
             c.y += m[1]
 
 
-def render(snap, shape, nucleus_px, rng, frame_idx):
+def autofluorescence_field(shape, rng, strength=1.0):
+    """Uneven green background (medium, plastic, debris): broad blobs, fixed over the movie."""
+    h, w = shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    f = np.zeros(shape)
+    for _ in range(7):
+        cy, cx = rng.uniform(0, h), rng.uniform(0, w)
+        sg = rng.uniform(0.12, 0.35) * max(h, w)
+        f += rng.uniform(0.4, 1.0) * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sg * sg))
+    f /= f.max() or 1.0
+    return strength * 700.0 * f
+
+
+def render(snap, shape, nucleus_px, rng, frame_idx, green_bg=None, autofluor=0.0):
     h, w = shape
     yy, xx = np.mgrid[0:h, 0:w]
     bg_r = 220 + 60 * (xx / w) + 40 * (yy / h)
     bg_g = 260 + 50 * (1 - xx / w) + 30 * (yy / h)
     red = bg_r.astype(np.float64)
     green = bg_g.astype(np.float64)
+    if green_bg is not None:
+        green = green + green_bg
     phase = np.full(shape, 1000.0) + 30 * np.sin(xx / 37.0) * np.cos(yy / 53.0)
     bleach = np.exp(-0.002 * frame_idx)
     R = nucleus_px / 2.0
     amp = 2600.0 * bleach
-    for (cid, par, x, y, ang, ax, ph, g, r, silent, bright) in snap:
+    for (cid, par, x, y, ang, ax, ph, g, r, silent, bright, cl) in snap:
         rad = R * (1.15 if ph == "M" else 1.0)
         k = int(rad * 3) + 3
         x0, x1 = max(0, int(x) - k), min(w, int(x) + k + 1)
@@ -156,11 +179,13 @@ def render(snap, shape, nucleus_px, rng, frame_idx):
         v = (-X * sa + Y * ca) / (rad * ax)
         d = np.sqrt(u * u + v * v)
         prof = 1.0 / (1.0 + np.exp((d - 1.0) * 9.0))
+        body = 1.0 / (1.0 + np.exp((d / 1.9 - 1.0) * 6.0))
         if not silent:
             scale = (0.6 if ph == "M" else 1.0) * bright * amp
             red[y0:y1, x0:x1] += prof * r * scale
             green[y0:y1, x0:x1] += prof * g * scale
-        body = 1.0 / (1.0 + np.exp((d / 1.9 - 1.0) * 6.0))
+        if autofluor:  # cytoplasmic green autofluorescence of every cell, coloured or not
+            green[y0:y1, x0:x1] += body * 0.07 * autofluor * amp
         ring = np.exp(-((d / 1.9 - 1.0) ** 2) / 0.02)
         if ph == "M":
             phase[y0:y1, x0:x1] += 260 * prof + 180 * ring
@@ -174,8 +199,9 @@ def render(snap, shape, nucleus_px, rng, frame_idx):
 
 
 def make_demo(out_dir: str | Path, wells: dict | None = None, fields: int = 1, n_frames: int = 49,
-              interval_min: float = 60.0, shape=(400, 560), seed: int = 7, write_settings: bool = True,
-              progress=None, compression: str | None = None) -> Path:
+              interval_min: float = 30.0, shape=(400, 560), seed: int = 7, write_settings: bool = True,
+              progress=None, compression: str | None = None, autofluor: float = 1.0,
+              colourless: dict | None = None, speed_um_h: dict | None = None) -> Path:
     import tifffile
 
     out = Path(out_dir)
@@ -183,9 +209,13 @@ def make_demo(out_dir: str | Path, wells: dict | None = None, fields: int = 1, n
         (out / ch).mkdir(parents=True, exist_ok=True)
     pixel_um, nucleus_um = 0.62, 12.0
     nucleus_px = nucleus_um / pixel_um
+    colourless = colourless or {"slow": 0.35, "fast": 0.12}
+    speed_um_h = speed_um_h or {"slow": 9.0, "fast": 11.0}
     conds = {
-        "slow": {"g1": 15.0, "g1_sd": 5.0, "arrest": 0.30, "speed_um_h": 8.0, "pixel_um": pixel_um},
-        "fast": {"g1": 9.0, "g1_sd": 2.5, "arrest": 0.06, "speed_um_h": 8.0, "pixel_um": pixel_um},
+        "slow": {"g1": 15.0, "g1_sd": 5.0, "arrest": 0.30, "speed_um_h": speed_um_h["slow"], "pixel_um": pixel_um,
+                 "colourless": colourless["slow"]},
+        "fast": {"g1": 9.0, "g1_sd": 2.5, "arrest": 0.06, "speed_um_h": speed_um_h["fast"], "pixel_um": pixel_um,
+                 "colourless": colourless["fast"]},
     }
     if wells is None:
         wells = {"B2": "slow", "B3": "slow", "B4": "slow", "C2": "fast", "C3": "fast", "C4": "fast"}
@@ -195,22 +225,23 @@ def make_demo(out_dir: str | Path, wells: dict | None = None, fields: int = 1, n
     jobs = [(w, f) for w in wells for f in range(1, fields + 1)]
     for k, (well, fld) in enumerate(jobs):
         frames = simulate_movie(rng, conds[wells[well]], n_frames, ih, shape, nucleus_px)
+        gbg = autofluorescence_field(shape, rng, autofluor) if autofluor else None
         for fi, snap in enumerate(frames):
-            red, green, phase = render(snap, shape, nucleus_px, rng, fi)
+            red, green, phase = render(snap, shape, nucleus_px, rng, fi, gbg, autofluor)
             mins = int(round(fi * interval_min))
             stamp = f"{mins // 1440:02d}d{(mins % 1440) // 60:02d}h{mins % 60:02d}m"
             name = f"Demo_{well}_{fld}_{stamp}.tif"
             tifffile.imwrite(out / "Red" / name, red, compression=compression)
             tifffile.imwrite(out / "Green" / name, green, compression=compression)
             tifffile.imwrite(out / "Phase" / name, phase, compression=compression)
-            for (cid, par, x, y, ang, ax, ph, g, r, silent, bright) in snap:
-                gt_rows.append((well, fld, fi, cid, par, round(x, 2), round(y, 2), ph, int(silent)))
+            for (cid, par, x, y, ang, ax, ph, g, r, silent, bright, cl) in snap:
+                gt_rows.append((well, fld, fi, cid, par, round(x, 2), round(y, 2), ph, int(silent), int(cl)))
         if progress:
             progress((k + 1) / len(jobs))
     gt_dir = out / "_ground_truth"
     gt_dir.mkdir(exist_ok=True)
     with open(gt_dir / "cells.csv", "w") as fh:
-        fh.write("well,field,frame,cell,parent,x,y,phase,silent\n")
+        fh.write("well,field,frame,cell,parent,x,y,phase,silent,colourless\n")
         for row in gt_rows:
             fh.write(",".join(str(v) for v in row) + "\n")
     if write_settings:

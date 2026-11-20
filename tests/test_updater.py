@@ -170,3 +170,23 @@ def test_backend_starts_and_reports_port(tmp_path, monkeypatch):
 def test_backend_that_dies_is_reported(tmp_path):
     with pytest.raises(RuntimeError, match="stopped"):
         up.spawn_backend([sys.executable, "-c", "raise SystemExit(3)"], tmp_path / "ready", timeout=20)
+
+
+def test_prefs_roundtrip_and_auto_install_off(env, monkeypatch):
+    assert up.load_prefs() == {"auto_check": True, "auto_install": True, "workers": 0}
+    p = up.save_prefs({"auto_install": False, "workers": "3", "bogus": 1})
+    assert p == {"auto_check": True, "auto_install": False, "workers": 3}
+    # with automatic installs off, launching never switches to a downloaded version
+    fake_bundle(up.versions_dir(), "0.1.9", name="PIP-FUCCI-0.1.9.app")
+    called = []
+    monkeypatch.setattr(up.os, "execve", lambda *a: called.append(a))
+    up.maybe_launch_newer(["PIP-FUCCI"])
+    assert not called
+
+
+def test_downloaded_version_shows_as_ready_at_start(env, monkeypatch):
+    fake_bundle(up.versions_dir(), "0.1.9", name="PIP-FUCCI-0.1.9.app")
+    u = up.Updater()
+    monkeypatch.setattr(u, "_loop", lambda delay: None)
+    u.start()
+    assert u.status["state"] == "ready" and u.status["ready_version"] == "0.1.9"

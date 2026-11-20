@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -20,16 +21,124 @@ import pandas as pd
 from . import __version__
 from . import io_incucyte as io
 from . import phases as ph
-from .pipeline import process_movie, retrack
+from .pipeline import segment_chunk, track_job
 from .settings import Settings, default_conditions, load_json, save_json
 
-SEG_KEYS = {"channel_map", "nucleus_um", "pixel_um", "sensitivity", "method"}
-TRACK_KEYS = {"interval_min", "max_speed_um_h", "max_gap_h"}
+SEG_KEYS = {"channel_map", "nucleus_um", "pixel_um", "sensitivity", "method", "bg_radius_um"}
+TRACK_KEYS = {"interval_min", "max_speed_um_h", "max_gap_h", "colourless_h"}
 CLASSIFY_KEYS = {"smoothing_h", "gate_green", "gate_red", "parental_well"}
+
+
+CHUNK = 6  # frames per parallel job
 
 
 class Cancelled(Exception):
     pass
+
+
+def worker_count(n_jobs: int = 10 ** 6, setting=None) -> int:
+    """Worker processes: all cores but one, capped by memory (about 1 GB each for 1408x1040 movies)."""
+    if setting not in (None, "auto"):
+        try:
+            return max(1, min(int(setting), n_jobs))
+        except Exception:
+            pass
+    cpus = os.cpu_count() or 2
+    n = max(1, cpus - 1)
+    try:
+        mem_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+        n = min(n, max(1, int(mem_gb // 1.0) - 1))
+    except Exception:
+        pass
+    return max(1, min(n, 12, n_jobs))
+
+
+class WorkerPool:
+    """Process pool with per-frame progress and cancel; falls back to running in this process."""
+
+    def __init__(self, workers: int):
+        self.workers = workers
+        self.ex = None
+        self.manager = None
+
+    def __enter__(self):
+        if self.workers > 1:
+            try:
+                import multiprocessing as mp
+
+                ctx = mp.get_context("spawn")
+                self.manager = ctx.Manager()
+                self.q = self.manager.Queue()
+                self.ex = ProcessPoolExecutor(max_workers=self.workers, mp_context=ctx)
+            except Exception:
+                self.ex = None
+        return self
+
+    def __exit__(self, *exc):
+        if self.ex is not None:
+            self.ex.shutdown(wait=exc[0] is None, cancel_futures=True)
+        if self.manager is not None:
+            try:
+                self.manager.shutdown()
+            except Exception:
+                pass
+        return False
+
+    def _kill(self):
+        for proc in list(getattr(self.ex, "_processes", {}).values()):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    def map(self, fn, jobs, cancel, on_frame=None):
+        if self.ex is not None:
+            try:
+                return self._map_pool(fn, jobs, cancel, on_frame)
+            except Cancelled:
+                raise
+            except Exception:
+                self._kill()
+                self.ex.shutdown(wait=False, cancel_futures=True)
+                self.ex = None
+        out = []
+
+        class Q:
+            def put(_self, _):
+                if on_frame:
+                    on_frame()
+                if cancel.is_set():
+                    raise Cancelled()
+
+        for j in jobs:
+            if cancel.is_set():
+                raise Cancelled()
+            out.append(fn({**j, "progress_q": Q()}))
+        return out
+
+    def _map_pool(self, fn, jobs, cancel, on_frame):
+        futs = [self.ex.submit(fn, {**j, "progress_q": self.q}) for j in jobs]
+        results = [None] * len(futs)
+        pending = dict(enumerate(futs))
+        while pending:
+            if cancel.is_set():
+                for f in futs:
+                    f.cancel()
+                self._kill()
+                raise Cancelled()
+            for i, f in list(pending.items()):
+                if f.done():
+                    results[i] = f.result()
+                    del pending[i]
+            while True:
+                try:
+                    self.q.get_nowait()
+                except Exception:
+                    break
+                if on_frame:
+                    on_frame()
+            time.sleep(0.2)
+        return results
 
 
 def versions() -> dict:
@@ -164,107 +273,89 @@ class Experiment:
             "daughter_radius_px": s.daughter_radius_px,
             "max_gap_frames": s.max_gap_frames,
             "edge_margin_px": s.edge_margin_px,
+            "bg_radius_px": s.bg_radius_px,
+            "colourless_frames": s.colourless_frames,
             "min_cycle_frames": max(2, int(round(10.0 / s.interval_h))),
             "sensitivity": s.sensitivity,
             "method": s.method,
         }
 
     # ------------------------------------------------------------ run
+    def _jobs(self):
+        mf = self.movie_files()
+        movies = mf.movies()
+        if not movies:
+            raise ValueError("No movies found with the current channel assignment.")
+        sd = self.derived_numbers()
+        mask_root = self.results_dir / "masks"
+        chunk_jobs, movie_info = [], {}
+        for mv in movies:
+            frames = mf.frames(mv)
+            paths = {f: dict(mf.files[mv][f]) for f in frames}
+            mdir = mask_root / movie_key(*mv)
+            if mdir.exists():
+                shutil.rmtree(mdir, ignore_errors=True)
+            old = mask_root / (movie_key(*mv) + ".npz")
+            if old.exists():
+                old.unlink()
+            # one confluence threshold per movie, from the first and middle frames
+            thr = []
+            for f in (frames[0], frames[len(frames) // 2]):
+                ph_img = io.read_channel(paths[f].get("phase"))
+                if ph_img is not None:
+                    from .segment import cell_mask
+
+                    thr.append(cell_mask(ph_img, sd["nucleus_px"])[1])
+            conf_thr = float(np.mean(thr)) if thr else None
+            movie_info[mv] = {"frames": frames, "paths": paths, "mask_dir": str(mdir)}
+            for i in range(0, len(frames), CHUNK):
+                fr = frames[i:i + CHUNK]
+                chunk_jobs.append({"movie": mv, "frames": fr, "paths": {f: paths[f] for f in fr},
+                                   "prev": paths[frames[i - 1]] if i > 0 else None, "settings": sd,
+                                   "mask_path": str(mdir / f"chunk_{fr[0]:05d}.npz"), "conf_thr": conf_thr})
+        return chunk_jobs, movie_info, sd
+
     def run(self, progress=None, cancel: threading.Event | None = None, workers: int | None = None) -> None:
         ok, msg = self.channels_ok()
         if not ok:
             raise ValueError(msg)
         progress = progress or (lambda **kw: None)
         cancel = cancel or threading.Event()
-        mf = self.movie_files()
-        movies = mf.movies()
-        if not movies:
-            raise ValueError("No movies found with the current channel assignment.")
-        sd = self.derived_numbers()
-        mask_dir = self.results_dir / "masks"
-        jobs = []
-        for mv in movies:
-            frames = {f: dict(mf.files[mv][f]) for f in mf.frames(mv)}
-            jobs.append({"movie": mv, "frames": frames, "settings": sd,
-                         "mask_path": str(mask_dir / (movie_key(*mv) + ".npz"))})
-        total = sum(len(j["frames"]) for j in jobs)
-        done_frames = 0
+        chunk_jobs, movie_info, sd = self._jobs()
+        total = sum(len(j["frames"]) for j in chunk_jobs)
         t0 = time.time()
-        results = []
+        state = {"done": 0}
 
-        def report(stage, extra=0):
-            frac = (done_frames + extra) / max(1, total)
+        def report(stage, frac=None):
+            if frac is None:
+                frac = 0.9 * state["done"] / max(1, total)
             el = time.time() - t0
-            eta = el / frac - el if frac > 0.02 else None
-            progress(stage=stage, done=done_frames + extra, total=total, fraction=min(frac, 0.99), eta_s=eta)
+            eta = el / frac - el if frac > 0.03 else None
+            progress(stage=stage, done=state["done"], total=total, fraction=min(frac, 0.99), eta_s=eta,
+                     workers=workers)
 
-        report("Segmenting and tracking")
-        if workers is None:
-            workers = max(1, min(4, (os.cpu_count() or 2) - 1))
-        workers = min(workers, len(jobs))
-        used_pool = False
-        if workers > 1:
-            try:
-                import multiprocessing as mp
-
-                ctx = mp.get_context("spawn")
-                manager = ctx.Manager()
-                q = manager.Queue()
-                for j in jobs:
-                    j["progress_q"] = q
-                with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
-                    futs = [ex.submit(process_movie, j) for j in jobs]
-                    pending = set(futs)
-                    extra = 0
-                    while pending:
-                        if cancel.is_set():
-                            for f in pending:
-                                f.cancel()
-                            for proc in list(getattr(ex, "_processes", {}).values()):
-                                try:
-                                    proc.terminate()
-                                except Exception:
-                                    pass
-                            ex.shutdown(wait=False, cancel_futures=True)
-                            manager.shutdown()
-                            raise Cancelled()
-                        done_now = [f for f in pending if f.done()]
-                        for f in done_now:
-                            pending.discard(f)
-                            results.append(f.result())
-                        while True:
-                            try:
-                                q.get_nowait()
-                                extra += 1
-                            except Exception:
-                                break
-                        done_frames = min(extra, total)
-                        report("Segmenting and tracking")
-                        time.sleep(0.25)
-                manager.shutdown()
-                used_pool = True
-            except Cancelled:
-                raise
-            except Exception:
-                try:
-                    manager.shutdown()
-                except Exception:
-                    pass
-                results = []
-                done_frames = 0
-                used_pool = False
-        if not used_pool:
-            class Q:
-                def put(_self, _):
-                    nonlocal done_frames
-                    done_frames += 1
-                    report("Segmenting and tracking")
-                    if cancel.is_set():
-                        raise Cancelled()
-
-            for j in jobs:
-                j["progress_q"] = Q()
-                results.append(process_movie(j))
+        workers = workers or worker_count(len(chunk_jobs))
+        report("Segmenting")
+        with WorkerPool(workers) as pool:
+            seg_results = pool.map(segment_chunk, chunk_jobs, cancel,
+                                   on_frame=lambda: (state.__setitem__("done", state["done"] + 1), report("Segmenting")))
+            by_movie = {}
+            for r in seg_results:
+                by_movie.setdefault(r["movie"], []).append(r)
+            track_jobs = []
+            for mv, parts in by_movie.items():
+                parts.sort(key=lambda r: r["frames"][0])
+                det = {k: np.concatenate([p["det"][k] for p in parts]) for k in parts[0]["det"]}
+                steps, conf = {}, {}
+                for p in parts:
+                    steps.update(p["steps"])
+                    conf.update(p["conf"])
+                info = movie_info[mv]
+                track_jobs.append({"movie": mv, "frames": info["frames"], "det": det, "steps": steps, "conf": conf,
+                                   "shape": parts[0]["shape"], "settings": sd, "mask_dir": info["mask_dir"],
+                                   "paths": info["paths"], "ranges": parts[0]["ranges"]})
+            report("Tracking", 0.9)
+            results = pool.map(track_job, track_jobs, cancel)
         progress(stage="Calling phases", done=total, total=total, fraction=0.99, eta_s=0)
         self._assemble(results)
         self.stale = None
@@ -292,6 +383,7 @@ class Experiment:
                 "red": d["red"].astype(np.float32), "green": d["green"].astype(np.float32),
                 "red_med": d["red_med"].astype(np.float32), "green_med": d["green_med"].astype(np.float32),
                 "edge": d["edge"].astype(bool), "tid": r["track_id"].astype(np.int64),
+                "interp": np.asarray(r.get("interp", np.zeros(n, bool)), dtype=bool),
             })
             pre = f"{well}-{fld}-"
             df["track"] = pre + df["tid"].astype(str)
@@ -305,6 +397,7 @@ class Experiment:
                 "shifts": r["shifts"], "ranges": r["ranges"], "shape": r["shape"], "seconds": r["seconds"],
             }
         cells = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+        cells = cells.sort_values(["well", "field", "tid", "frame"], kind="stable").reset_index(drop=True)
         self.cells = cells
         self.meta = {
             "movies": movies_meta,
@@ -315,24 +408,34 @@ class Experiment:
                     "settings": self.settings.to_dict(), "derived": self.settings.derived()},
         }
 
-    def retrack(self) -> None:
+    def retrack(self, progress=None) -> None:
+        """Re-link tracks from the saved detections (segmentation is kept)."""
         with self.lock:
-            s = self.settings
             sd = self.derived_numbers()
-            parents, low_conf = {}, set()
-            for (well, fld), sub in self.cells.groupby(["well", "field"], sort=False):
-                tr = retrack(sub["frame"].values, sub["x_reg"].values, sub["y_reg"].values, sub["red"].values,
-                             sub["green"].values, sub["area"].values, sd, s.nucleus_px)
-                pre = f"{well}-{fld}-"
-                self.cells.loc[sub.index, "tid"] = tr["track_id"]
-                for c, p in tr["parent"].items():
-                    parents[pre + str(c)] = pre + str(p)
-                low_conf.update(pre + str(c) for c in tr["low_conf"])
-            self.cells["track"] = self.cells["well"] + "-" + self.cells["field"].astype(str) + "-" + self.cells["tid"].astype(str)
-            self.meta["parents"] = parents
-            self.meta["low_conf"] = sorted(low_conf)
-            self.meta.setdefault("run", {})["settings"] = s.to_dict()
-            self.meta["run"]["derived"] = s.derived()
+            mf = self.movie_files()
+            real = self.cells[~self.cells.get("interp", pd.Series(False, index=self.cells.index))]
+            jobs = []
+            for (well, fld), sub in real.groupby(["well", "field"], sort=False):
+                m = self.meta["movies"][movie_key(well, fld)]
+                frames = m["frames"]
+                cum = {f: tuple(v) for f, v in zip(frames, m["shifts"])}
+                steps = {}
+                for a, b in zip(frames[:-1], frames[1:]):
+                    steps[b] = (cum[b][0] - cum[a][0], cum[b][1] - cum[a][1])
+                sub = sub.sort_values("frame", kind="stable")
+                det = {k: sub[k].values for k in ("frame", "label", "x", "y", "area", "red", "green", "red_med",
+                                                   "green_med", "edge")}
+                mv = (well, int(fld))
+                jobs.append({"movie": (well, int(fld)), "frames": frames, "det": det, "steps": steps,
+                             "conf": dict(zip(frames, m["confluence"])), "shape": m["shape"], "settings": sd,
+                             "mask_dir": str(self.results_dir / "masks" / movie_key(*mv)),
+                             "paths": {f: dict(mf.files[mv][f]) for f in mf.frames(mv)}, "ranges": m["ranges"]})
+            results = [track_job(j) for j in jobs]
+            keep_meta = self.meta
+            self._assemble(results)
+            self.meta["run"] = keep_meta.get("run", self.meta["run"])
+            self.meta["run"]["settings"] = self.settings.to_dict()
+            self.meta["run"]["derived"] = self.settings.derived()
             self.stale = None
             self.flags = {}
             self.save_flags()
@@ -352,9 +455,11 @@ class Experiment:
             if c is None or len(c) == 0:
                 return
             fm = self.fucci_mask()
+            interp = c["interp"].values if "interp" in c else np.zeros(len(c), bool)
+            fm_real = fm & ~interp  # filled-in colourless positions don't set the scales or gates
             r_all = c["red"].values
             g_all = c["green"].values
-            _, _, scales = ph.normalise(r_all[fm], g_all[fm])
+            _, _, scales = ph.normalise(r_all[fm_real], g_all[fm_real])
             r = np.clip(np.nan_to_num(r_all) / scales["red"], 0, None).astype(np.float32)
             g = np.clip(np.nan_to_num(g_all) / scales["green"], 0, None).astype(np.float32)
             c["r_n"] = r
@@ -364,9 +469,9 @@ class Experiment:
                 floor = {"red": float(np.percentile(r[~fm], 99)), "green": float(np.percentile(g[~fm], 99))}
             s = self.settings
             if s.gate_green is None:
-                s.gate_green = round(ph.auto_gate(g[fm], floor["green"] if floor else None), 3)
+                s.gate_green = round(ph.auto_gate(g[fm_real], floor["green"] if floor else None), 3)
             if s.gate_red is None:
-                s.gate_red = round(ph.auto_gate(r[fm], floor["red"] if floor else None), 3)
+                s.gate_red = round(ph.auto_gate(r[fm_real], floor["red"] if floor else None), 3)
             c["raw"] = ph.raw_calls(r, g, s.gate_red, s.gate_green)
             em = ph.emissions(r, g, s.gate_red, s.gate_green)
             smoothed = np.zeros(len(c), dtype=np.int8)
@@ -376,6 +481,8 @@ class Experiment:
                 smoothed[idx] = ph.smooth_tracks(codes.astype(np.int64), sub["frame"].values, em[idx],
                                                  s.interval_h, s.smoothing_frames)
             c["phase"] = smoothed
+            # what the cell looks like at that frame: its phase, or Colourless when neither reporter is on
+            c["call"] = np.where(c["raw"].values == 3, 3, smoothed).astype(np.int8)
             self.meta["scales"] = scales
             self.meta["floor"] = floor
             self._build_tracks()
