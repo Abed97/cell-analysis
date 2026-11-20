@@ -7,6 +7,8 @@ tifffile==2026.11.16
 imagecodecs==2026.11.11
 pillow==13.0.0
 pywebview==6.2.1
+truststore==0.10.5  # https with the Mac's own certificates (update checks)
+certifi==2026.10.23  # fallback certificate bundle
 pyobjc-framework-UserNotifications  # notification when an analysis finishes (same version as pywebview's pyobjc)
 pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.10

@@ -259,7 +259,9 @@ def restart_into_newest() -> None:
 def _get(url: str, timeout: float = 20):
     req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{__version__}",
                                                "Accept": "application/vnd.github+json"})
-    return urllib.request.urlopen(req, timeout=timeout)
+    from .net import urlopen
+
+    return urlopen(req, timeout=timeout)
 
 
 def extract_app(zip_path: Path, dest: Path) -> Path:

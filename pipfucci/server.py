@@ -323,7 +323,9 @@ def check_update():
     try:
         req = urllib.request.Request(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
                                      headers={"Accept": "application/vnd.github+json", "User-Agent": APP_NAME})
-        with urllib.request.urlopen(req, timeout=6) as r:
+        from .net import urlopen
+
+        with urlopen(req, timeout=6) as r:
             data = json.loads(r.read().decode())
         latest = str(data.get("tag_name", "")).lstrip("v")
 

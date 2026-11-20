@@ -93,6 +93,15 @@ jobs:
           grep -q "usernotifications=yes" <<<"$out"
           grep -q "appkit=yes" <<<"$out"
 
+      - name: Check https works without the build machine's certificates (as on her Mac)
+        env:
+          SSL_CERT_FILE: /nonexistent/cert.pem
+          SSL_CERT_DIR: /nonexistent
+        run: |
+          out="$(dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --check-ssl "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest")"
+          echo "$out"
+          grep -q "ssl ok via" <<<"$out"
+
       - name: Package the app for automatic updates
         run: |
           ditto -c -k --keepParent dist/PIP-FUCCI.app "PIP-FUCCI-${{ matrix.label }}.app.zip"

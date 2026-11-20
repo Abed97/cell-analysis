@@ -190,3 +190,33 @@ def test_downloaded_version_shows_as_ready_at_start(env, monkeypatch):
     monkeypatch.setattr(u, "_loop", lambda delay: None)
     u.start()
     assert u.status["state"] == "ready" and u.status["ready_version"] == "0.1.9"
+
+
+def test_https_falls_back_when_a_trust_store_fails(monkeypatch):
+    import ssl
+    import urllib.error
+
+    from pipfucci import net
+
+    tried = []
+
+    def fake_urlopen(req, timeout=None, context=None):
+        tried.append(context.name)
+        if context.name != "certifi":
+            raise urllib.error.URLError(ssl.SSLCertVerificationError(1, "unable to get local issuer certificate"))
+        return "ok"
+
+    class Ctx:
+        def __init__(self, name):
+            self.name = name
+
+    monkeypatch.setattr(net, "_contexts", lambda: [("system", Ctx("system")), ("certifi", Ctx("certifi")),
+                                                   ("default", Ctx("default"))])
+    monkeypatch.setattr(net.urllib.request, "urlopen", fake_urlopen)
+    net._good.clear()
+    assert net.urlopen("https://example.org") == "ok"
+    assert tried == ["system", "certifi"] and net._good == ["certifi"]
+    tried.clear()
+    assert net.urlopen("https://example.org") == "ok"
+    assert tried == ["certifi"]  # remembers what worked
+    net._good.clear()
