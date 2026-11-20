@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 
 def _setup_logging():
@@ -34,7 +35,13 @@ def selftest() -> int:
     from .server import serve
 
     with tempfile.TemporaryDirectory() as d:
-        make_demo(d, wells={"B2": "slow", "C2": "fast"}, n_frames=10, shape=(200, 260))
+        # LZW-compressed like Incucyte exports: fails here if the TIFF codecs are not bundled
+        make_demo(d, wells={"B2": "slow", "C2": "fast"}, n_frames=10, shape=(200, 260), compression="lzw")
+        import tifffile
+
+        probe = next(Path(d).rglob("*.tif"))
+        assert tifffile.TiffFile(probe).pages[0].compression == 5, "demo images are not LZW"
+        tifffile.imread(probe)  # decoded by imagecodecs, not the Pillow fallback
         exp = Experiment(d)
         exp.run(workers=2)
         assert exp.has_results and len(exp.tracks) > 0, "no tracks"

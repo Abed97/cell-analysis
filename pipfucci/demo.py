@@ -175,7 +175,7 @@ def render(snap, shape, nucleus_px, rng, frame_idx):
 
 def make_demo(out_dir: str | Path, wells: dict | None = None, fields: int = 1, n_frames: int = 49,
               interval_min: float = 60.0, shape=(400, 560), seed: int = 7, write_settings: bool = True,
-              progress=None) -> Path:
+              progress=None, compression: str | None = None) -> Path:
     import tifffile
 
     out = Path(out_dir)
@@ -200,9 +200,9 @@ def make_demo(out_dir: str | Path, wells: dict | None = None, fields: int = 1, n
             mins = int(round(fi * interval_min))
             stamp = f"{mins // 1440:02d}d{(mins % 1440) // 60:02d}h{mins % 60:02d}m"
             name = f"Demo_{well}_{fld}_{stamp}.tif"
-            tifffile.imwrite(out / "Red" / name, red)
-            tifffile.imwrite(out / "Green" / name, green)
-            tifffile.imwrite(out / "Phase" / name, phase)
+            tifffile.imwrite(out / "Red" / name, red, compression=compression)
+            tifffile.imwrite(out / "Green" / name, green, compression=compression)
+            tifffile.imwrite(out / "Phase" / name, phase, compression=compression)
             for (cid, par, x, y, ang, ax, ph, g, r, silent, bright) in snap:
                 gt_rows.append((well, fld, fi, cid, par, round(x, 2), round(y, 2), ph, int(silent)))
         if progress:

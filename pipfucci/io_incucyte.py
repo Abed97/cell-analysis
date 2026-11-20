@@ -190,6 +190,12 @@ def default_channel_map(index: dict) -> dict:
             used.add(guess)
         else:
             cmap[g["key"]] = "ignore"
+    # Incucyte often names phase images with no channel word ("Plate_B2_1_..." next to
+    # "Green Plate_B2_1_..." and "Red Plate_B2_1_..."): one unnamed group left -> the missing channel
+    unknown = [g["key"] for g in index["groups"] if cmap[g["key"]] == "ignore" and not g["guess"]]
+    missing = [c for c in ("phase", "green", "red") if c not in used]
+    if len(unknown) == 1 and len(missing) == 1:
+        cmap[unknown[0]] = missing[0]
     # merged colour exports: one group holds everything
     if len(index["groups"]) == 1 and index.get("image", {}).get("rgb"):
         cmap[index["groups"][0]["key"]] = "rgb"
@@ -226,16 +232,33 @@ class MovieFiles:
         return self.files[movie].get(frame, {}).get(channel)
 
 
+def _read_tiff(path: str) -> np.ndarray:
+    """tifffile first (handles LZW etc. through imagecodecs); Pillow as a fallback decoder."""
+    import tifffile
+
+    try:
+        return np.asarray(tifffile.imread(path))
+    except Exception as first:
+        try:
+            from PIL import Image
+
+            with Image.open(path) as im:
+                im.seek(0)
+                return np.asarray(im)
+        except Exception:
+            raise first from None
+
+
 def read_channel(path: str | None) -> np.ndarray | None:
     if not path:
         return None
-    import tifffile
-
     sub = None
     if "#" in path:
         path, sub = path.rsplit("#", 1)
-    img = tifffile.imread(path)
-    img = np.asarray(img)
+    try:
+        img = _read_tiff(path)
+    except Exception as e:
+        raise RuntimeError(f"Could not read image {Path(path).name}: {e}") from None
     if img.ndim == 3 and img.shape[-1] in (3, 4):
         if sub == "red":
             img = img[..., 0]

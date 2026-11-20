@@ -67,7 +67,7 @@ jobs:
           python -m venv .venv
           uv pip install --python .venv/bin/python --python-platform ${{ matrix.platform }} \
             --only-binary numpy --only-binary scipy --only-binary scikit-image \
-            --only-binary pandas --only-binary pillow \
+            --only-binary pandas --only-binary pillow --only-binary imagecodecs \
             -r packaging/requirements-mac.txt
 
       - name: Record version and repository in the app
