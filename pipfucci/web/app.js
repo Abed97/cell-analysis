@@ -221,6 +221,7 @@ async function openFolder(path) {
     S.v.well = null; S.sc.sel = null; S.sc.cond = null; S.pop.scond = null; S.activeCond = null;
     updateSteps();
     setView('experiment');
+    if (S.st.progress && S.st.progress.running) startPolling();
   } catch (e) { fail(e); }
 }
 

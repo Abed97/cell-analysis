@@ -263,6 +263,13 @@ def open_folder(path: str):
     STATE.exp = exp
     exp.save()
     STATE.add_recent(exp)
+    # analysed before colonies existed: measure them from the saved masks (seconds, no re-run)
+    if (exp.has_results and exp.stale is None and "measured_min_object_um2" not in exp.meta
+            and (exp.results_dir / "masks").is_dir() and not STATE.progress.get("running")):
+        try:
+            run_remeasure()
+        except Exception:  # noqa: BLE001 - optional
+            pass
     return state()
 
 
