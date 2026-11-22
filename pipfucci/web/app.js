@@ -13,8 +13,8 @@ const S = {
   st: null, view: 'experiment', polling: false, activeCond: null,
   v: { well: null, field: null, frame: 0, layers: new Set(['phase', 'red', 'green', 'bgsub', 'masks']), ids: false, playing: false, sel: null,
        scatter: null, gg: null, gr: null, timer: null, cells: null, ver: 0, fps: 6 },
-  fig: { data: null },
-  pop: { metric: 'count_norm', scond: null, data: null },
+  fig: { data: null, ctx: null, colStyle: 'lines', every: null, log: true },
+  pop: { metric: 'count_norm', scond: null, data: null, hidden: new Set(), colStyle: 'lines', dist: null },
   sc: { cond: null, sort: 'division', sel: null, data: null },
 };
 
@@ -87,6 +87,7 @@ function updateSteps() {
 
 function setView(v) {
   stopPlay();
+  ixReset();
   S.view = v;
   updateSteps();
   render();
@@ -311,16 +312,20 @@ function plateCard(e) {
   const s = e.settings, sm = e.summary;
   const present = new Set(sm.wells);
   const conds = s.conditions || [];
-  if (!S.activeCond || !conds.find((c) => c.id === S.activeCond)) S.activeCond = conds.length ? conds[0].id : null;
+  if (!S.activeCond || (S.activeCond !== '_exclude' && !conds.find((c) => c.id === S.activeCond))) S.activeCond = conds.length ? conds[0].id : null;
   const byId = Object.fromEntries(conds.map((c) => [c.id, c]));
+  const exList = s.excluded || [];
+  const exWell = new Set([...exList.filter((x) => !x.includes('_')), ...(e.excluded_wells || [])]);
+  const exField = new Set(exList.filter((x) => x.includes('_')).map((x) => x.split('_')[0]));
   const rows = 'ABCDEFGH'.split('').map((r) => {
     const cells = Array.from({ length: 12 }, (_, i) => {
       const w = r + (i + 1);
       const isPar = s.parental_well === w;
       const c = byId[s.wells[w]];
       const col = isPar ? '#A0A8B2' : c ? c.color : null;
-      const label = `Well ${w}` + (present.has(w) ? (isPar ? ', parental control' : c ? ', ' + c.name : ', not assigned') : ', no images');
-      return `<button type="button" class="well" data-well="${w}" ${present.has(w) ? '' : 'disabled'} title="${esc(label)}" aria-label="${esc(label)}"
+      const exNote = exWell.has(w) ? ', excluded from results (blurry)' : exField.has(w) ? ', some fields excluded' : '';
+      const label = `Well ${w}` + (present.has(w) ? (isPar ? ', parental control' : c ? ', ' + c.name : ', not assigned') : ', no images') + exNote;
+      return `<button type="button" class="well${exWell.has(w) ? ' excluded' : ''}" data-well="${w}" ${present.has(w) ? '' : 'disabled'} title="${esc(label)}" aria-label="${esc(label)}"
         style="${col ? `background:${col};border-color:${col}` : present.has(w) ? 'border-color:#6B7480' : ''}${isPar ? ';background-image:repeating-linear-gradient(45deg,#0F1215 0 3px,transparent 3px 6px)' : ''}"></button>`;
     }).join('');
     return `<div class="prow"><span class="hdr">${r}</span>${cells}</div>`;
@@ -336,7 +341,9 @@ function plateCard(e) {
   return `<section class="card" aria-labelledby="plate-h">
     <div class="card-head"><div><h2 id="plate-h">Plate map</h2><p>Pick a condition, then click wells to assign or clear them. Statistics are done per well.</p></div></div>
     <div style="overflow-x:auto"><div class="plate"><div class="prow"><span></span>${Array.from({ length: 12 }, (_, i) => `<span class="hdr">${i + 1}</span>`).join('')}</div>${rows}</div></div>
-    <div class="cond-list">${condRows}<div><button type="button" class="btn ghost sm" id="cond-add">${ICON.plus} Condition</button></div></div>
+    <div class="cond-list">${condRows}<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><button type="button" class="btn ghost sm" id="cond-add">${ICON.plus} Condition</button>
+      <button type="button" class="chip cond-pick" data-id="_exclude" aria-pressed="${S.activeCond === '_exclude'}" title="Click wells to leave them out of every result (blurry images); click again to include them"><span class="dot" style="background:none;border:2px solid #FF6B6B"></span>Exclude wells (blurry)<span class="mono small muted">${exWell.size}</span></button></div>
+      ${S.activeCond === '_exclude' ? '<p class="small muted">Click wells to leave them out of all results (crossed out); click again to bring them back. Nothing is re-analysed. To leave out a single field, use “Use in results” in step 2.</p>' : ''}</div>
     <div class="setrow"><div class="lbl"><label for="parental">Parental (non-FUCCI) control</label><span>Optional. Sets the autofluorescence floor for the gates.</span></div>
       <select id="parental" class="input" style="flex:0 0 160px">${parOpts}</select></div>
   </section>`;
@@ -404,6 +411,11 @@ function renderExperiment() {
   $('#parental').onchange = (ev) => save({ parental_well: ev.target.value || null });
   $$('.well').forEach((b) => b.onclick = () => {
     const w = b.dataset.well;
+    if (S.activeCond === '_exclude') {
+      const ex = (s.excluded || []).filter((x) => x !== w && !x.startsWith(w + '_'));
+      if (!(s.excluded || []).includes(w)) ex.push(w);
+      return save({ excluded: ex });
+    }
     const wells = { ...s.wells };
     if (!S.activeCond) return toast('Add a condition first.');
     if (wells[w] === S.activeCond) delete wells[w]; else wells[w] = S.activeCond;
@@ -459,7 +471,10 @@ function renderViewer() {
   const shape = mv.shape || [1040, 1408];
   S.v.shape = shape;
   const scalePct = (50 / s.pixel_um) / shape[1] * 100;
-  const opts = movies.map((m) => `<option value="${m.well}|${m.field}" ${m.well === S.v.well && m.field === S.v.field ? 'selected' : ''}>${m.well} · ${esc(condOfWell(m.well))} · field ${m.field}</option>`).join('');
+  const exL = s.excluded || [];
+  const isEx = (w, f) => exL.includes(w) || exL.includes(`${w}_${f}`);
+  const opts = movies.map((m) => `<option value="${m.well}|${m.field}" ${m.well === S.v.well && m.field === S.v.field ? 'selected' : ''}>${m.well} · ${esc(condOfWell(m.well))} · field ${m.field}${isEx(m.well, m.field) ? ' · excluded' : ''}</option>`).join('');
+  const exState = exL.includes(S.v.well) ? 'well' : exL.includes(`${S.v.well}_${S.v.field}`) ? 'field' : 'yes';
   const layerDefs = [['phase', 'Phase contrast', '#8A929B'], ['green', 'PIP-mVenus', '#3FBF6A'], ['red', 'mCherry-Geminin', '#E5486E'],
     ['bgsub', 'Remove background', '#9CC2FF'], ['masks', 'Nucleus outlines', '#E7E9EC'], ['ids', 'Cell numbers', '#F2C94C'], ['confluence', 'Confluence area', '#5AB8FF']];
   const layers = layerDefs.map(([k, n, c]) => `<label class="chip" title="${k === 'bgsub' ? 'Show red and green with the autofluorescent background subtracted, as the analysis sees them' : k === 'confluence' ? 'Area counted as covered by cells (from phase contrast, all cells whatever their colour)' : ''}"><input type="checkbox" data-layer="${k}" ${(k === 'ids' ? S.v.ids : S.v.layers.has(k)) ? 'checked' : ''}><span class="dot" style="background:${c};border-radius:3px"></span>${n}</label>`).join('');
@@ -468,12 +483,17 @@ function renderViewer() {
       <select class="input" id="movie" aria-label="Well and field">${opts}</select></div>`)
     + `<div class="row-wrap">
       <section class="card tight" style="flex:3 1 560px" aria-label="Image viewer">
-        <div class="legend" role="group" aria-label="Layers">${layers}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <div class="legend" role="group" aria-label="Layers">${layers}</div>
+          <div style="display:flex;align-items:center;gap:8px"><span class="small muted">Use in results</span>
+            <div class="seg" role="group" aria-label="Use this field in results" title="Leave out blurry fields or wells. Nothing is re-analysed; they are just left out of the results, figures and exports.">
+              <button type="button" data-useres="yes" aria-pressed="${exState === 'yes'}">Yes</button><button type="button" data-useres="field" aria-pressed="${exState === 'field'}">Not this field</button><button type="button" data-useres="well" aria-pressed="${exState === 'well'}">Not well ${esc(S.v.well)}</button></div></div></div>
         <div class="viewer-wrap" id="vwrap" style="aspect-ratio:${shape[1]} / ${shape[0]}">
           <img id="frame-img" alt="Field of view with segmented nuclei">
           <svg class="ids-layer" id="ids" viewBox="0 0 ${shape[1]} ${shape[0]}" preserveAspectRatio="none" aria-label="Cell numbers"></svg>
           <div class="ov" style="left:12px;top:12px;pointer-events:none" id="ov-time">t = 0 h</div>
           <div class="ov" style="right:12px;top:12px;pointer-events:none">${S.v.well} · field ${S.v.field}</div>
+          ${exState !== 'yes' ? `<div class="ex-flag">${exState === 'well' ? `Well ${S.v.well}` : 'This field'} is left out of all results</div>` : ''}
           <div class="scale" style="width:${scalePct}%;pointer-events:none"><div></div><span>50 µm</span></div>
         </div>
         <div class="frame-nav" role="group" aria-label="Frame">
@@ -527,6 +547,18 @@ function renderViewer() {
           <button class="btn primary" id="to-pop">Population results ${ICON.arrow}</button></div>
       </div></div>`;
 
+  $$('[data-useres]').forEach((b) => b.onclick = async () => {
+    const w = S.v.well, f = `${S.v.well}_${S.v.field}`;
+    let ex = (s.excluded || []).filter((x) => x !== w && x !== f);
+    if (b.dataset.useres === 'well') ex = ex.filter((x) => !x.startsWith(w + '_')).concat([w]);
+    if (b.dataset.useres === 'field') ex.push(f);
+    try {
+      const r = await api('settings', { excluded: ex });
+      S.st = r.state; markSaved(); S.v.ver++;
+      toast(b.dataset.useres === 'yes' ? `${w} field ${S.v.field} is used in the results again.` : `${b.dataset.useres === 'well' ? 'Well ' + w : w + ' field ' + S.v.field} is left out of all results.`);
+      renderViewer();
+    } catch (err) { fail(err); }
+  });
   $('#movie').onchange = (ev) => { const [w, f] = ev.target.value.split('|'); S.v.well = w; S.v.field = parseInt(f, 10); S.v.sel = null; stopPlay(); renderViewer(); };
   $$('input[data-layer]').forEach((c) => c.onchange = () => {
     const k = c.dataset.layer;
@@ -827,17 +859,39 @@ function setupGates() {
 // ---------------------------------------------------------------- charts
 function niceStep(max) { return max > 120 ? 48 : max > 48 ? 24 : max > 24 ? 12 : 6; }
 
-function lineChart({ w = 360, h = 236, hours, series, ymin = 0, ymax, yticks, yfmt = (v) => v, ylabel = '', refY = null }) {
+// Time ticks for any visible range (zoomed or not).
+function hourTicks(h0, h1, maxN = 7) {
+  const span = Math.max(h1 - h0, 1e-6);
+  const st = [0.25, 0.5, 1, 2, 3, 6, 12, 24, 48, 96, 192].find((x) => span / x <= maxN - 1) || 384;
+  const out = [];
+  for (let x = Math.ceil(h0 / st - 1e-9) * st; x <= h1 + 1e-9; x += st) out.push(+x.toFixed(4));
+  return out;
+}
+
+function visibleMax(hours, series, h0, h1, withSem = true) {
+  let m = 0;
+  series.forEach((se) => se.mean.forEach((v, i) => {
+    if (v != null && hours[i] >= h0 - 1e-9 && hours[i] <= h1 + 1e-9) m = Math.max(m, v + (withSem && se.sem ? (se.sem[i] || 0) : 0));
+  }));
+  return m;
+}
+
+// Dark-theme line chart (mean ± SEM bands) for the app's own pages. Returns { svg, panels } so it
+// can be hovered and zoomed (see ix.js). autoY(max) -> { ymax, yticks } rescales y to what is visible.
+function lineChart({ w = 360, h = 236, hours, series, ymin = 0, ymax, yticks, yfmt = (v) => v, ylabel = '', refY = null, zoom = null, autoY = null, vfmt = null, title = '' }) {
   const l = 44, r = 10, t = 12, b = 42;
-  const xmax = Math.max(1, hours[hours.length - 1] || 1);
-  const sx = (x) => l + x / xmax * (w - l - r);
+  const hmax = Math.max(1e-6, hours[hours.length - 1] || 1);
+  const h0 = zoom ? zoom.h0 : 0, h1 = zoom ? zoom.h1 : hmax;
+  if (autoY) ({ ymax, yticks } = autoY(visibleMax(hours, series, h0, h1)));
+  const sx = (x) => l + (x - h0) / (h1 - h0) * (w - l - r);
   const sy = (y) => (h - b) - (clamp(y, ymin, ymax) - ymin) / (ymax - ymin) * (h - b - t);
-  let s = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(ylabel)} over time" style="width:100%;height:auto;display:block">`;
+  const cid = ixId();
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(ylabel)} over time" style="width:100%;height:auto;display:block"><defs><clipPath id="${cid}"><rect x="${l}" y="${t - 2}" width="${w - l - r}" height="${h - b - t + 4}"/></clipPath></defs>`;
   yticks.forEach((v) => { s += `<path d="M${l} ${sy(v).toFixed(1)}H${w - r}" stroke="${v === ymin ? '#3A4148' : '#23282D'}" stroke-width="1"/><text x="${l - 6}" y="${(sy(v) + 3).toFixed(1)}" fill="#A0A8B2" font-size="10" font-family="ui-monospace,Menlo,monospace" text-anchor="end">${yfmt(v)}</text>`; });
-  const st = niceStep(xmax);
-  for (let x = 0; x <= xmax + 1e-6; x += st) s += `<text x="${sx(x).toFixed(1)}" y="${h - b + 15}" fill="#A0A8B2" font-size="10" font-family="ui-monospace,Menlo,monospace" text-anchor="middle">${x}</text>`;
-  s += `<text x="${(l + w - r) / 2}" y="${h - 6}" fill="#C9D1DA" font-size="11" text-anchor="middle">Time (h)</text>`;
+  hourTicks(h0, h1).forEach((x) => { s += `<text x="${sx(x).toFixed(1)}" y="${h - b + 15}" fill="#A0A8B2" font-size="10" font-family="ui-monospace,Menlo,monospace" text-anchor="middle">${x}</text>`; });
+  s += `<text x="${(l + w - r) / 2}" y="${h - 6}" fill="#C9D1DA" font-size="11" text-anchor="middle">Time (h)${zoom ? ' · zoomed' : ''}</text>`;
   if (refY != null) s += `<path d="M${l} ${sy(refY).toFixed(1)}H${w - r}" stroke="#6B7480" stroke-dasharray="4 4" fill="none"/>`;
+  s += `<g clip-path="url(#${cid})">`;
   series.forEach((se) => {
     const pts = [], up = [], lo = [];
     se.mean.forEach((m, i) => {
@@ -849,41 +903,59 @@ function lineChart({ w = 360, h = 236, hours, series, ymin = 0, ymax, yticks, yf
     if (se.sem) s += `<path d="M${up.join('L')}L${lo.reverse().join('L')}Z" fill="${se.color}" fill-opacity="0.2"/>`;
     s += `<path d="M${pts.join('L')}" fill="none" stroke="${se.color}" stroke-width="2" stroke-linejoin="round"${se.dashed ? ' stroke-dasharray="6 4"' : ''}/>`;
   });
-  return s + '</svg>';
+  s += '</g></svg>';
+  const panels = [{ type: 'time', x0: l, x1: w - r, y0: t, y1: h - b, h0, h1, hFull: [0, hmax], sy, title,
+    fmt: vfmt || ((v) => ixNum(v)), series: series.map((se) => ({ name: se.name || '', color: se.color, dashed: se.dashed, hours, values: se.mean, sem: se.sem })) }];
+  return { svg: s, panels };
 }
 
+// Legend entries are buttons: click to hide or show a condition in every chart on the page.
 function condLegend(conds) {
-  return conds.map((c) => `<span title="${esc(c.wells.join(', '))}"><span class="ln" style="background:${c.dashed ? `repeating-linear-gradient(90deg,${c.color} 0 5px,transparent 5px 8px)` : c.color}"></span>${esc(c.name)} <span class="mono muted">${c.wells.length > 4 ? c.wells.length + ' wells' : esc(c.wells.join(', '))}</span></span>`).join('');
+  const hidden = S.pop.hidden;
+  return conds.map((c) => `<button type="button" class="leg-btn" data-legend="${esc(c.id)}" aria-pressed="${!hidden.has(c.id)}" title="${esc(c.wells.join(', '))} · click to ${hidden.has(c.id) ? 'show' : 'hide'}"><span class="ln" style="background:${c.dashed ? `repeating-linear-gradient(90deg,${c.color} 0 5px,transparent 5px 8px)` : c.color}"></span>${esc(c.name)} <span class="mono muted">${c.wells.length > 4 ? c.wells.length + ' wells' : esc(c.wells.join(', '))}</span></button>`).join('');
+}
+
+function popSeries(d, key) {
+  return d.conditions.filter((c) => !S.pop.hidden.has(c.id) && c[key]).map((c) => ({ name: c.name, color: c.color, dashed: c.dashed, mean: c[key].mean, sem: c[key].sem }));
 }
 
 // ---------------------------------------------------------------- step 3: population
 async function renderPopulation() {
   if (!hasResults()) return needResults();
-  main.innerHTML = header(3, 'Population') + '<p class="muted">Loading…</p>';
+  if (!S.pop.data) main.innerHTML = header(3, 'Population') + '<p class="muted">Loading…</p>';
   let d;
   try { d = await api('population'); } catch (e) { return fail(e); }
+  if (S.view !== 'population') return;
   S.pop.data = d;
+  S.pop.hidden = S.pop.hidden || new Set();
   if (!d.conditions.length) {
-    main.innerHTML = header(3, 'Population') + '<div class="empty"><h2>No conditions with wells</h2><p class="muted">Assign wells to conditions on the plate map in step 1.</p></div>';
+    main.innerHTML = header(3, 'Population') + excludedNote() + '<div class="empty"><h2>No conditions with wells</h2><p class="muted">Assign wells to conditions on the plate map in step 1.</p></div>';
     return;
   }
   const scConds = ownConditions();
   if (!S.pop.scond || !scConds.find((c) => c.id === S.pop.scond)) S.pop.scond = scConds.length ? scConds[0].id : null;
   const panels = ['G1', 'S', 'G2M', 'Colourless'].map((p, i) => `<figure style="margin:0;display:flex;flex-direction:column;gap:8px">
       <figcaption style="display:flex;align-items:center;gap:8px;font-weight:600"><span class="dot" style="background:${PH_COL[i]}"></span>${PH_LABEL[i]}<span class="small muted" style="font-weight:400">% of cells</span></figcaption>
-      ${lineChart({ w: 300, h: 214, hours: d.hours, series: d.conditions.filter((c) => c[p]).map((c) => ({ color: c.color, dashed: c.dashed, mean: c[p].mean, sem: c[p].sem })), ymin: 0, ymax: 100, yticks: [0, 25, 50, 75, 100], ylabel: '% ' + PH_LABEL[i] })}</figure>`).join('');
+      ${ixChart((z) => lineChart({ w: 300, h: 214, hours: d.hours, series: popSeries(d, p), ymin: 0, ymax: 100, yticks: [0, 25, 50, 75, 100], ylabel: '% ' + PH_LABEL[i], zoom: z, vfmt: (v) => ixNum(v, 1) + '%', title: PH_LABEL[i] }), { group: 'pop' })}</figure>`).join('');
   const linked = (S.st.experiment.linked || []).filter((l) => l.ok);
   const metrics = [['count_norm', 'Cell number (× t0)'], ['total', 'Nuclei'], ['confluence', 'Confluence']];
   const nF = d.hours.length;
   const tps = [0, Math.round((nF - 1) / 3), Math.round(2 * (nF - 1) / 3), nF - 1];
-  main.innerHTML = header(3, 'Population', `<div class="legend">${condLegend(d.conditions)}<span class="muted">Mean ± SEM across wells</span></div>`)
+  const box = S.pop.colStyle === 'box';
+  main.innerHTML = header(3, 'Population', `<div class="legend" role="group" aria-label="Conditions (click to hide or show)">${condLegend(d.conditions)}<span class="muted">Mean ± SEM across wells</span></div>`)
+    + excludedNote()
     + (linked.length ? `<div class="info">${ICON.info}<span>Includes ${linked.length} other experiment${linked.length === 1 ? '' : 's'} (${linked.map((l) => esc(l.name)).join(', ')}); conditions with the same name are pooled, wells are the replicates. <button class="link" id="go-fig">Change on the Figures page</button></span></div>` : '')
+    + `<p class="small muted">Charts are interactive: hover for values, drag across a time range to zoom (all charts on this page follow), pinch to zoom, double-click to reset. Click a condition above to hide or show it.</p>`
     + `<section class="card" aria-labelledby="frac-h"><div class="card-head"><div><h2 id="frac-h">Phase fractions over time</h2><p>Each well is summarised first; bands are the SEM across wells. Phase calls are smoothed per track; Colourless = neither reporter on (mostly just after division).</p></div></div>
        <div class="grid4">${panels}</div></section>
-     <section class="card" aria-labelledby="col-h"><div class="card-head"><div><h2 id="col-h">Colonies</h2><p>From the confluence mask (phase contrast, every cell): touching cells form one colony, objects smaller than ${num(S.st.experiment.settings.min_object_um2)} µm² are ignored as debris (change it in step 2). Mean ± SEM across wells.</p></div></div>
+     <section class="card" aria-labelledby="col-h"><div class="card-head"><div><h2 id="col-h">Colonies</h2><p>From the confluence mask (phase contrast, every cell): touching cells form one colony, objects smaller than ${num(S.st.experiment.settings.min_object_um2)} µm² are ignored as debris (change it in step 2). ${box ? 'Box plots: one dot per image for colony number; a sample of colonies for area.' : 'Mean ± SEM across wells.'}</p></div>
+         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">
+           <div class="seg" role="group" aria-label="Plot style"><button type="button" data-pcol="lines" aria-pressed="${!box}">Lines</button><button type="button" data-pcol="box" aria-pressed="${box}">Box plots</button></div>
+           ${box ? `<label class="small muted" style="display:inline-flex;align-items:center;gap:6px">Every <select class="input" id="pcol-every" style="height:34px">${[['', 'Auto'], ['1', '1 h'], ['2', '2 h'], ['3', '3 h'], ['6', '6 h'], ['12', '12 h'], ['24', '24 h'], ['48', '48 h']].map(([v, n]) => `<option value="${v}" ${String(S.fig.every || '') === v ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+           <label class="chip"><input type="checkbox" id="pcol-log" ${S.fig.log ? 'checked' : ''}>Log scale (area)</label>` : ''}</div></div>
        <div class="grid2">
-         <figure style="margin:0;display:flex;flex-direction:column;gap:8px"><figcaption style="font-weight:600">Colony number <span class="small muted" style="font-weight:400">per image</span></figcaption>${colonyChart(d, 'colonies')}</figure>
-         <figure style="margin:0;display:flex;flex-direction:column;gap:8px"><figcaption style="font-weight:600">Average colony area <span class="small muted" style="font-weight:400">µm²</span></figcaption>${colonyChart(d, 'colony_area')}</figure>
+         <figure style="margin:0;display:flex;flex-direction:column;gap:8px"><figcaption style="font-weight:600">Colony number <span class="small muted" style="font-weight:400">per image</span></figcaption><div id="col-a">${box ? '<p class="muted small">Loading…</p>' : colonyChart(d, 'colonies')}</div></figure>
+         <figure style="margin:0;display:flex;flex-direction:column;gap:8px"><figcaption style="font-weight:600">${box ? 'Colony area' : 'Average colony area'} <span class="small muted" style="font-weight:400">µm²</span></figcaption><div id="col-b">${box ? '<p class="muted small">Loading…</p>' : colonyChart(d, 'colony_area')}</div></figure>
        </div></section>
      <div class="grid2" style="align-items:stretch">
        <section class="card" aria-labelledby="cnt-h"><div class="card-head"><div><h2 id="cnt-h">Growth</h2><p id="cnt-sub"></p></div>
@@ -897,28 +969,55 @@ async function renderPopulation() {
      </div>
      ${exportCard()}`;
   drawCount();
+  if (box) drawColonyBoxes();
   $$('[data-metric]').forEach((b) => b.onclick = () => { S.pop.metric = b.dataset.metric; $$('[data-metric]').forEach((x) => x.setAttribute('aria-pressed', x === b)); drawCount(); });
   $$('[data-scond]').forEach((b) => b.onclick = () => { S.pop.scond = b.dataset.scond; $$('[data-scond]').forEach((x) => x.setAttribute('aria-pressed', x === b)); drawSmallScatters(tps); });
+  $$('[data-legend]').forEach((b) => b.onclick = () => { const id = b.dataset.legend; if (S.pop.hidden.has(id)) S.pop.hidden.delete(id); else S.pop.hidden.add(id); renderPopulation(); });
+  $$('[data-pcol]').forEach((b) => b.onclick = () => { S.pop.colStyle = b.dataset.pcol; renderPopulation(); });
+  const pe = $('#pcol-every'); if (pe) pe.onchange = () => { S.fig.every = pe.value ? parseFloat(pe.value) : null; S.pop.dist = null; drawColonyBoxes(); };
+  const pl = $('#pcol-log'); if (pl) pl.onchange = () => { S.fig.log = pl.checked; drawColonyBoxes(); };
   drawSmallScatters(tps);
   bindExport();
   const gf = $('#go-fig'); if (gf) gf.onclick = () => setView('figures');
 }
 
+async function drawColonyBoxes() {
+  const want = S.fig.every || null;
+  if (!S.pop.dist || S.pop.distEvery !== want) {
+    try { S.pop.dist = await api('colony_dist' + (want ? `?every=${want}` : '')); S.pop.distEvery = want; } catch (e) { return fail(e); }
+  }
+  const dist = S.pop.dist;
+  const vis = new Set(S.pop.data.conditions.filter((c) => !S.pop.hidden.has(c.id)).map((c) => c.id));
+  const conds = dist.conditions.filter((c) => vis.has(c.id));
+  const a = $('#col-a'), b = $('#col-b');
+  if (!a || !b) return;
+  if (!conds.some((c) => c.counts.some((x) => x.stats))) { a.innerHTML = b.innerHTML = '<p class="muted small">No colony measurements yet.</p>'; return; }
+  a.innerHTML = ixChart(() => colonyBoxChart(dist, conds, 'counts', false));
+  b.innerHTML = ixChart(() => colonyBoxChart(dist, conds, 'areas', S.fig.log));
+}
+
 function ownConditions() {
   const e = S.st.experiment, s = e.settings;
-  return s.conditions.filter((c) => Object.entries(s.wells).some(([w, id]) => id === c.id && e.summary.wells.includes(w) && w !== s.parental_well));
+  const ex = new Set((s.excluded || []).filter((x) => !x.includes('_')));
+  return s.conditions.filter((c) => Object.entries(s.wells).some(([w, id]) => id === c.id && e.summary.wells.includes(w) && w !== s.parental_well && !ex.has(w)));
 }
 
 function drawCount() {
   const d = S.pop.data, m = S.pop.metric;
-  let max = 0;
-  d.conditions.forEach((c) => c[m].mean.forEach((v, i) => { if (v != null) max = Math.max(max, v + (c[m].sem[i] || 0)); }));
-  let ymax, yticks, fmt = (v) => v, sub, ref = null;
-  if (m === 'count_norm') { ymax = Math.max(1.5, Math.ceil(max * 2) / 2); const st = ymax > 4 ? 1 : 0.5; yticks = []; for (let v = 0; v <= ymax + 1e-6; v += st) yticks.push(+v.toFixed(2)); sub = 'Segmented nuclei per well, as a fold of the first frame. The dashed line is the start.'; ref = 1; }
-  else if (m === 'total') { ymax = Math.max(10, Math.ceil(max / 50) * 50); yticks = [0, ymax / 4, ymax / 2, 3 * ymax / 4, ymax].map(Math.round); sub = 'Segmented nuclei per well (all fields).'; }
-  else { ymax = Math.min(100, Math.max(10, Math.ceil(max / 10) * 10)); yticks = [0, ymax / 4, ymax / 2, 3 * ymax / 4, ymax].map((v) => Math.round(v)); fmt = (v) => v + '%'; sub = 'Phase-contrast confluence, mean of fields per well.'; }
+  let fmt = (v) => v, sub, ref = null, vfmt;
+  let autoY;
+  if (m === 'count_norm') {
+    autoY = (max) => { const ymax = Math.max(1.5, Math.ceil(max * 2) / 2); const st = ymax > 4 ? 1 : 0.5; const yt = []; for (let v = 0; v <= ymax + 1e-6; v += st) yt.push(+v.toFixed(2)); return { ymax, yticks: yt }; };
+    sub = 'Segmented nuclei per well, as a fold of the first frame. The dashed line is the start.'; ref = 1; vfmt = (v) => ixNum(v, 2) + '×';
+  } else if (m === 'total') {
+    autoY = (max) => { const ymax = Math.max(10, Math.ceil(max / 50) * 50); return { ymax, yticks: [0, ymax / 4, ymax / 2, 3 * ymax / 4, ymax].map(Math.round) }; };
+    sub = 'Segmented nuclei per well (all fields).'; vfmt = (v) => ixNum(v, 0);
+  } else {
+    autoY = (max) => { const ymax = Math.min(100, Math.max(10, Math.ceil(max / 10) * 10)); return { ymax, yticks: [0, ymax / 4, ymax / 2, 3 * ymax / 4, ymax].map((v) => Math.round(v)) }; };
+    fmt = (v) => v + '%'; sub = 'Phase-contrast confluence (every cell, debris left out), mean of fields per well.'; vfmt = (v) => ixNum(v, 1) + '%';
+  }
   $('#cnt-sub').textContent = sub;
-  $('#cnt-chart').innerHTML = lineChart({ w: 520, h: 300, hours: d.hours, series: d.conditions.map((c) => ({ color: c.color, dashed: c.dashed, mean: c[m].mean, sem: c[m].sem })), ymin: 0, ymax, yticks, yfmt: fmt, refY: ref, ylabel: sub });
+  $('#cnt-chart').innerHTML = ixChart((z) => lineChart({ w: 520, h: 300, hours: d.hours, series: popSeries(d, m), ymin: 0, yfmt: fmt, refY: ref, ylabel: sub, zoom: z, autoY, vfmt }), { group: 'pop' });
 }
 
 function niceTicks(max, n = 4) {
@@ -931,13 +1030,13 @@ function niceTicks(max, n = 4) {
 }
 
 function colonyChart(d, key) {
-  const conds = d.conditions.filter((c) => c[key]);
-  let max = 0;
-  conds.forEach((c) => c[key].mean.forEach((v, i) => { if (v != null) max = Math.max(max, v + (c[key].sem[i] || 0)); }));
-  if (!max) return '<p class="muted small">No colony measurements yet. Re-run the analysis (analyses made before this version have none).</p>';
-  const { ymax, ticks } = niceTicks(max);
-  const fmt = key === 'colony_area' ? (v) => (v >= 10000 ? (v / 1000).toFixed(0) + 'k' : v >= 1000 ? (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(v)) : (v) => String(v);
-  return lineChart({ w: 520, h: 280, hours: d.hours, series: conds.map((c) => ({ color: c.color, dashed: c.dashed, mean: c[key].mean, sem: c[key].sem })), ymin: 0, ymax, yticks: ticks, yfmt: fmt, ylabel: key === 'colonies' ? 'Colonies per image' : 'Mean colony area (µm²)' });
+  const series = popSeries(d, key);
+  if (!series.some((se) => se.mean.some((v) => v != null))) return '<p class="muted small">No colony measurements yet. Open the experiment again (they are measured automatically) or re-run the analysis.</p>';
+  const area = key === 'colony_area';
+  const fmt = area ? (v) => (v >= 10000 ? (v / 1000).toFixed(0) + 'k' : v >= 1000 ? (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(v)) : (v) => String(v);
+  return ixChart((z) => lineChart({ w: 520, h: 280, hours: d.hours, series, ymin: 0, yfmt: fmt, zoom: z, ylabel: area ? 'Mean colony area (µm²)' : 'Colonies per image',
+    autoY: (max) => { const r = niceTicks(Math.max(max, 1e-6)); return { ymax: r.ymax, yticks: r.ticks }; },
+    vfmt: area ? (v) => Math.round(v).toLocaleString() + ' µm²' : (v) => ixNum(v, 1) }), { group: 'pop' });
 }
 
 async function drawSmallScatters(tps) {
@@ -969,10 +1068,12 @@ async function drawSmallScatters(tps) {
 function exportCard() {
   return `<section class="card" aria-labelledby="exp-h" style="flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between">
     <div style="flex:1 1 320px"><h2 id="exp-h">Export</h2><p class="small muted" style="margin-top:4px">Prism tables (one column per well, grouped by condition), per-cell and per-track tables, and the settings and software versions used. Run statistics on well means, never on individual cells.</p></div>
-    <button class="btn primary" id="btn-export">${ICON.down} Export all tables</button></section>`;
+    <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn" id="btn-export-figs">${ICON.down} Export all graphs &amp; figures</button><button class="btn primary" id="btn-export">${ICON.down} Export all tables</button></div></section>`;
 }
 
 function bindExport() {
+  const ef = $('#btn-export-figs');
+  if (ef) ef.onclick = () => exportAll(ef);
   const b = $('#btn-export');
   if (!b) return;
   b.onclick = async () => {
@@ -1083,6 +1184,36 @@ function drawHeat() {
   };
 }
 
+// One cell's red and green over time, shaded by phase; hover for values, drag to zoom.
+function traceChart(d, zoom) {
+  const e = S.st.experiment;
+  const hours = e.hours, hmax = hours[hours.length - 1] || 1;
+  const h0 = zoom ? zoom.h0 : 0, h1 = zoom ? zoom.h1 : hmax;
+  const W = 520, H = 210, l = 36, r = 10, t = 10, b = 36;
+  const sx = (x) => l + (x - h0) / (h1 - h0) * (W - l - r), sy = (v) => (H - b) - clamp(v, 0, 1.2) / 1.2 * (H - b - t);
+  const cid = ixId();
+  let shade = '';
+  for (const sg of d.durations.segments) {
+    const ph = PH.indexOf(sg.phase);
+    const x0 = sx(hours[sg.start] - e.settings.interval_min / 120), x1 = sx(hours[sg.end] + e.settings.interval_min / 120);
+    shade += `<rect x="${x0.toFixed(1)}" y="${t}" width="${Math.max(1, x1 - x0).toFixed(1)}" height="${H - b - t}" fill="${PH_COL[ph]}" fill-opacity="0.16"/>`;
+  }
+  const th = d.frames.map((f) => hours[f]);
+  const lg = th.map((x, i) => `${sx(x).toFixed(1)} ${sy(d.g[i]).toFixed(1)}`).join('L');
+  const lr = th.map((x, i) => `${sx(x).toFixed(1)} ${sy(d.r[i]).toFixed(1)}`).join('L');
+  const xt = hourTicks(h0, h1).map((x) => `<text x="${sx(x).toFixed(1)}" y="${H - b + 14}" fill="#A0A8B2" font-size="10" font-family="ui-monospace,Menlo,monospace" text-anchor="middle">${x}</text>`).join('');
+  const svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Green and red intensity over time with phase shading" style="width:100%;height:auto;display:block;background:#0F1215;border-radius:8px">
+    <defs><clipPath id="${cid}"><rect x="${l}" y="${t}" width="${W - l - r}" height="${H - b - t}"/></clipPath></defs>
+    <path d="M${l} ${sy(0)}H${W - r}" stroke="#3A4148"/><path d="M${l} ${sy(0.5).toFixed(1)}H${W - r}M${l} ${sy(1).toFixed(1)}H${W - r}" stroke="#23282D"/>
+    <text x="${l - 6}" y="${sy(0) + 3}" fill="#A0A8B2" font-size="10" text-anchor="end">0</text><text x="${l - 6}" y="${(sy(1) + 3).toFixed(1)}" fill="#A0A8B2" font-size="10" text-anchor="end">1.0</text>
+    ${xt}<text x="${(l + W - r) / 2}" y="${H - 6}" fill="#C9D1DA" font-size="11" text-anchor="middle">Time (h)${zoom ? ' · zoomed' : ''}</text>
+    <g clip-path="url(#${cid})">${shade}<path d="M${lg}" fill="none" stroke="#5FD487" stroke-width="2" stroke-linejoin="round"/><path d="M${lr}" fill="none" stroke="#F07C99" stroke-width="2" stroke-linejoin="round"/></g></svg>`;
+  const calls = (d.call || d.phase).map((p) => p);
+  return { svg, panels: [{ type: 'time', x0: l, x1: W - r, y0: t, y1: H - b, h0, h1, hFull: [0, hmax], sy, fmt: (v) => ixNum(v, 2),
+    series: [{ name: 'PIP-mVenus (green)', color: '#5FD487', hours: th, values: d.g }, { name: 'mCherry-Geminin (red)', color: '#F07C99', hours: th, values: d.r },
+      { name: 'Phase', color: '#8A929B', hours: th, values: calls, noDot: true, fmt: (p) => PH_LABEL[p] || '–' }] }] };
+}
+
 async function loadTrack(key) {
   const panel = $('#cell-panel');
   let d;
@@ -1097,24 +1228,7 @@ async function loadTrack(key) {
   const idx = Object.fromEntries(d.frames.map((f, i) => [f, i]));
   const mcols = d.montage_frames.length || 1;
   const calls = d.montage_frames.map((f) => { const p = (d.call || d.phase)[idx[f]]; return `<div><div style="color:${PH_TXT[p]};font-weight:600">${PH_LABEL[p]}</div><div class="mono muted" style="font-size:10px">${num(hours[f])}h</div></div>`; }).join('');
-  // traces
-  const W = 520, H = 210, l = 36, r = 10, t = 10, b = 36;
-  const sx = (x) => l + x / xmax * (W - l - r), sy = (v) => (H - b) - clamp(v, 0, 1.2) / 1.2 * (H - b - t);
-  let shade = '';
-  for (const sg of d.durations.segments) {
-    const ph = PH.indexOf(sg.phase);
-    const x0 = sx(hours[sg.start] - e.settings.interval_min / 120), x1 = sx(hours[sg.end] + e.settings.interval_min / 120);
-    shade += `<rect x="${x0.toFixed(1)}" y="${t}" width="${Math.max(1, x1 - x0).toFixed(1)}" height="${H - b - t}" fill="${PH_COL[ph]}" fill-opacity="0.16"/>`;
-  }
-  const lg = d.frames.map((f, i) => `${sx(hours[f]).toFixed(1)} ${sy(d.g[i]).toFixed(1)}`).join('L');
-  const lr = d.frames.map((f, i) => `${sx(hours[f]).toFixed(1)} ${sy(d.r[i]).toFixed(1)}`).join('L');
-  const st = niceStep(xmax);
-  let xt = ''; for (let x = 0; x <= xmax + 1e-6; x += st) xt += `<text x="${sx(x).toFixed(1)}" y="${H - b + 14}" fill="#A0A8B2" font-size="10" font-family="ui-monospace,Menlo,monospace" text-anchor="middle">${x}</text>`;
-  const traces = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Green and red intensity over time with phase shading" style="width:100%;height:auto;display:block;background:#0F1215;border-radius:8px">
-    ${shade}<path d="M${l} ${sy(0)}H${W - r}" stroke="#3A4148"/><path d="M${l} ${sy(0.5).toFixed(1)}H${W - r}M${l} ${sy(1).toFixed(1)}H${W - r}" stroke="#23282D"/>
-    <text x="${l - 6}" y="${sy(0) + 3}" fill="#A0A8B2" font-size="10" text-anchor="end">0</text><text x="${l - 6}" y="${(sy(1) + 3).toFixed(1)}" fill="#A0A8B2" font-size="10" text-anchor="end">1.0</text>
-    ${xt}<text x="${(l + W - r) / 2}" y="${H - 6}" fill="#C9D1DA" font-size="11" text-anchor="middle">Time (h)</text>
-    <path d="M${lg}" fill="none" stroke="#5FD487" stroke-width="2" stroke-linejoin="round"/><path d="M${lr}" fill="none" stroke="#F07C99" stroke-width="2" stroke-linejoin="round"/></svg>`;
+  const traces = ixChart((z) => traceChart(d, z), { group: 'trace' });
   const prec = num(d.precision_h);
   const durRows = d.durations.segments.map((sg) => `<tr><td><span class="dot" style="background:${PH_COL[PH.indexOf(sg.phase)]};margin-right:8px"></span>${PH_LABEL[PH.indexOf(sg.phase)]} <span class="muted small">${num(hours[sg.start])}–${num(hours[sg.end])} h</span></td><td style="color:${sg.observed ? 'var(--text)' : 'var(--muted)'}">${sg.observed ? `${num(sg.hours)} h ± ${prec} h` : 'censored'}</td></tr>`).join('')
     + `<tr><td><strong>Full cycle</strong></td><td style="color:${d.durations.cycle_h != null ? 'var(--text)' : 'var(--muted)'}">${d.durations.cycle_h != null ? `${num(d.durations.cycle_h)} h ± ${prec} h` : 'needs birth and division in the movie'}</td></tr>`;
@@ -1217,6 +1331,17 @@ async function loadDurations() {
   try { d = await api('durations'); } catch (e) { return fail(e); }
   const conds = d.conditions;
   const groups = [['G1', 'G1'], ['S', 'S'], ['G2M', 'G2/M'], ['cycle', 'Full cycle']];
+  $('#dur-chart').innerHTML = ixChart(() => durationsChart(conds));
+  $('#dur-sub').textContent = `One dot per cell per phase, fully observed phases only; bars are medians. Every value is ± ${num(d.precision_h)} h (one frame). Censored phases are left out here and kept in the export.`;
+  $('#dur-stats').innerHTML = groups.map(([k, name]) => `<div class="stat"><span class="small muted">Median ${name}</span>${conds.map((c) => {
+    const med = k === 'cycle' ? c.median_cycle : c.median[k]; const n = (k === 'cycle' ? c.cycle : c.values[k]).length;
+    return `<span class="mono small" style="color:${c.color}">${esc(c.name)}: ${med == null ? '–' : num(med) + ' h'} <span class="muted">(n = ${n})</span></span>`; }).join('')}</div>`).join('');
+}
+
+// Dot plot of phase durations by condition (Single cells page): hover a dot for its value, a
+// column for median / quartiles / n; click a dot to open that cell.
+function durationsChart(conds) {
+  const groups = [['G1', 'G1'], ['S', 'S'], ['G2M', 'G2/M'], ['cycle', 'Full cycle']];
   let max = 12;
   conds.forEach((c) => { groups.forEach(([k]) => { (k === 'cycle' ? c.cycle : c.values[k]).forEach((v) => { max = Math.max(max, v); }); }); });
   const ymax = Math.ceil(max / 12) * 12;
@@ -1228,323 +1353,30 @@ async function loadDurations() {
   let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Dot plot of phase durations by condition" style="width:100%;height:auto;display:block">`;
   for (let v = 0; v <= ymax; v += ymax / 4) s += `<path d="M${l} ${sy(v).toFixed(1)}H${W - r}" stroke="${v === 0 ? '#3A4148' : '#23282D'}"/><text x="${l - 8}" y="${(sy(v) + 4).toFixed(1)}" fill="#A0A8B2" font-size="11" font-family="ui-monospace,Menlo,monospace" text-anchor="end">${num(v)}</text>`;
   s += `<text x="16" y="${(t + H - b) / 2}" fill="#C9D1DA" font-size="12" text-anchor="middle" transform="rotate(-90 16 ${(t + H - b) / 2})">Duration (h)</text>`;
-  let seed = 1; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const rnd = seeded(1);
+  const panel = { type: 'box', x0: l, x1: W - r, y0: t, y1: H - b, boxes: [], dots: [], ring: '#FFFFFF' };
   groups.forEach(([k, name], gi) => {
     const cx = l + gw * (gi + 0.5);
     s += `<text x="${cx}" y="${H - b + 22}" fill="#E7E9EC" font-size="13" font-weight="600" text-anchor="middle">${name}</text>`;
     conds.forEach((c, ci) => {
       const x = cx + (ci - (nc - 1) / 2) * colW;
       const vals = k === 'cycle' ? c.cycle : c.values[k];
-      vals.forEach((v) => { s += `<circle cx="${(x + (rnd() - 0.5) * colW * 0.7).toFixed(1)}" cy="${sy(v).toFixed(1)}" r="2.6" fill="${c.color}" fill-opacity="0.55"/>`; });
+      const keys = k === 'cycle' ? [] : ((c.keys || {})[k] || []);
+      vals.forEach((v, i) => {
+        const xx = x + (rnd() - 0.5) * colW * 0.7, yy = sy(v);
+        s += `<circle cx="${xx.toFixed(1)}" cy="${yy.toFixed(1)}" r="2.6" fill="${c.color}" fill-opacity="0.55"/>`;
+        const key = keys[i] || null;
+        panel.dots.push({ x: xx, y: yy, key, text: `${c.name} · ${name}: ${num(v)} h${key ? ` (cell ${key.split('-').pop()}, ${key.split('-')[0]})` : ''}` });
+      });
       const med = k === 'cycle' ? c.median_cycle : c.median[k];
       if (med != null) s += `<path d="M${(x - colW * 0.42).toFixed(1)} ${sy(med).toFixed(1)}H${(x + colW * 0.42).toFixed(1)}" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>`;
+      panel.boxes.push({ cx: x, half: colW / 2, name: c.name, title: `${c.name} · ${name}`, color: c.color, stats: boxStats([...vals].sort((a2, b2) => a2 - b2)), fmt: (v) => num(v) + ' h' });
     });
   });
-  $('#dur-chart').innerHTML = s + '</svg>';
-  $('#dur-sub').textContent = `One dot per cell per phase, fully observed phases only; bars are medians. Every value is ± ${num(d.precision_h)} h (one frame). Censored phases are left out here and kept in the export.`;
-  $('#dur-stats').innerHTML = groups.map(([k, name]) => `<div class="stat"><span class="small muted">Median ${name}</span>${conds.map((c) => {
-    const med = k === 'cycle' ? c.median_cycle : c.median[k]; const n = (k === 'cycle' ? c.cycle : c.values[k]).length;
-    return `<span class="mono small" style="color:${c.color}">${esc(c.name)}: ${med == null ? '–' : num(med) + ' h'} <span class="muted">(n = ${n})</span></span>`; }).join('')}</div>`).join('');
+  return { svg: s + '</svg>', panels: [panel] };
 }
 
-// ---------------------------------------------------------------- step 5: figures
-const PUB = { G1: '#3DAA4F', S: '#E0393E', G2M: '#F2C230', Colourless: '#8C8C8C', Unclassified: '#E8E8E8' };
-const CATS = ['G1', 'S', 'G2M', 'Colourless', 'Unclassified'];
-const CAT_LABEL = { G1: 'G1', S: 'S', G2M: 'G2/M', Colourless: 'Colourless', Unclassified: 'Unclassified' };
-const FF = 'Helvetica, Arial, sans-serif';
-const r1 = (v) => (Math.round(v * 10) / 10).toString();
-
-function svgOpen(W, H, label) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="${FF}" role="img" aria-label="${esc(label)}"><rect x="0" y="0" width="${W}" height="${H}" fill="#FFFFFF"/>`;
-}
-
-function yAxis(x, y0, y1, ticks, sy, fmt = (v) => v) {
-  let s = `<path d="M${x} ${y0}V${y1}" stroke="#000" stroke-width="1"/>`;
-  ticks.forEach((v) => { const y = r1(sy(v)); s += `<path d="M${x - 4} ${y}H${x}" stroke="#000"/><text x="${x - 7}" y="${(+y + 3.8).toFixed(1)}" font-size="11" text-anchor="end" fill="#000">${fmt(v)}</text>`; });
-  return s;
-}
-
-function xAxis(y, x0, x1, ticks, sx) {
-  let s = `<path d="M${x0} ${y}H${x1}" stroke="#000" stroke-width="1"/>`;
-  ticks.forEach((v) => { const x = r1(sx(v)); s += `<path d="M${x} ${y}V${y + 4}" stroke="#000"/><text x="${x}" y="${y + 16}" font-size="11" text-anchor="middle" fill="#000">${v}</text>`; });
-  return s;
-}
-
-function timeTicks(xmax) { const st = niceStep(xmax); const t = []; for (let x = 0; x <= xmax + 1e-6; x += st) t.push(x); return t; }
-
-function niceMax(v, steps = [10, 20, 25, 50, 100]) {
-  for (const s of steps) if (v <= s) return s;
-  return Math.ceil(v / 50) * 50;
-}
-
-function figComposition(d, conds) {
-  const pw = 230, ph = 180, gap = 34, l = 58, t = 34, b = 48, legW = 130;
-  const W = l + conds.length * pw + (conds.length - 1) * gap + 28 + legW, H = t + ph + b;
-  const hours = d.hours, xmax = hours[hours.length - 1] || 1;
-  let s = svgOpen(W, H, 'Cell-cycle composition over time');
-  conds.forEach((c, i) => {
-    const x0 = l + i * (pw + gap);
-    const sx = (h) => x0 + h / xmax * pw, sy = (v) => t + ph - v / 100 * ph;
-    const cum = hours.map(() => 0);
-    CATS.forEach((k) => {
-      const vals = (c.composition[k] || []).map((v) => (v == null ? 0 : v));
-      if (!vals.length) return;
-      const up = hours.map((h, j) => `${r1(sx(h))} ${r1(sy(cum[j] + vals[j]))}`);
-      const lo = hours.map((h, j) => `${r1(sx(h))} ${r1(sy(cum[j]))}`).reverse();
-      s += `<path d="M${up.join('L')}L${lo.join('L')}Z" fill="${PUB[k]}" stroke="none"/>`;
-      vals.forEach((v, j) => { cum[j] += v; });
-    });
-    s += yAxis(x0, t, t + ph, [0, 25, 50, 75, 100], sy) + xAxis(t + ph, x0, x0 + pw, timeTicks(xmax), sx);
-    s += `<text x="${x0 + pw / 2}" y="${t - 12}" font-size="13" font-weight="700" text-anchor="middle" fill="${esc(c.color)}">${esc(c.name)} (n=${c.n})</text>`;
-    s += `<text x="${x0 + pw / 2}" y="${H - 10}" font-size="12" text-anchor="middle" fill="#000">Time (h)</text>`;
-  });
-  s += `<text x="16" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 16 ${t + ph / 2})">% of cells</text>`;
-  const lx = W - legW + 4;
-  [...CATS].reverse().forEach((k, j) => {
-    const y = t + 8 + j * 20;
-    s += `<rect x="${lx}" y="${y}" width="14" height="12" fill="${PUB[k]}" stroke="${k === 'Unclassified' ? '#BBBBBB' : 'none'}"/><text x="${lx + 20}" y="${y + 10}" font-size="11" fill="#000">${CAT_LABEL[k]}</text>`;
-  });
-  return s + '</svg>';
-}
-
-function quantile(sorted, q) {
-  if (!sorted.length) return null;
-  const pos = (sorted.length - 1) * q, lo = Math.floor(pos), hi = Math.ceil(pos);
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
-}
-
-function figDurations(d, conds) {
-  const phases = [['G1', 'G1 duration'], ['S', 'S duration'], ['G2M', 'G2/M duration']];
-  const longest = Math.max(4, ...conds.map((c) => Math.min(18, c.name.length)));
-  const cw = Math.max(58, Math.min(124, longest * 6.4 + 12)), l = 62, t = 34, ph = 200, gap = 40, b = 64;
-  const pw = Math.max(120, conds.length * cw + 20);
-  const W = l + phases.length * pw + (phases.length - 1) * gap + 16, H = t + ph + b;
-  let s = svgOpen(W, H, 'Hours per observed stage');
-  let seed = 7; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
-  phases.forEach(([k, title], pi) => {
-    const x0 = l + pi * (pw + gap);
-    let mx = 4;
-    conds.forEach((c) => (c.durations[k] || []).forEach((v) => { mx = Math.max(mx, v); }));
-    const ymax = niceMax(mx * 1.05, [4, 6, 8, 10, 12, 16, 20, 24, 30, 36, 48, 60, 72, 96]);
-    const st = ymax <= 12 ? 2 : ymax <= 24 ? 4 : ymax <= 48 ? 12 : 24;
-    const ticks = []; for (let v = 0; v <= ymax + 1e-6; v += st) ticks.push(v);
-    const sy = (v) => t + ph - v / ymax * ph;
-    s += yAxis(x0, t, t + ph, ticks, sy) + `<path d="M${x0} ${t + ph}H${x0 + pw}" stroke="#000"/>`;
-    s += `<text x="${x0 + pw / 2}" y="${t - 14}" font-size="13" font-weight="700" text-anchor="middle" fill="#000">${title}</text>`;
-    conds.forEach((c, ci) => {
-      const cx = x0 + 10 + cw * (ci + 0.5) + (pw - 20 - conds.length * cw) / 2;
-      const vals = (c.durations[k] || []).slice().sort((a, b2) => a - b2);
-      if (vals.length) {
-        const q1 = quantile(vals, 0.25), q3 = quantile(vals, 0.75), med = quantile(vals, 0.5), iqr = q3 - q1;
-        const wlo = vals.find((v) => v >= q1 - 1.5 * iqr), whi = [...vals].reverse().find((v) => v <= q3 + 1.5 * iqr);
-        const bw = cw * 0.56;
-        s += `<path d="M${cx} ${r1(sy(wlo))}V${r1(sy(q1))}M${cx} ${r1(sy(q3))}V${r1(sy(whi))}M${r1(cx - bw / 4)} ${r1(sy(wlo))}H${r1(cx + bw / 4)}M${r1(cx - bw / 4)} ${r1(sy(whi))}H${r1(cx + bw / 4)}" stroke="#000" stroke-width="1.2" fill="none"/>`;
-        s += `<rect x="${r1(cx - bw / 2)}" y="${r1(sy(q3))}" width="${r1(bw)}" height="${r1(Math.max(0.5, sy(q1) - sy(q3)))}" fill="none" stroke="#000" stroke-width="1.2"/>`;
-        vals.forEach((v) => { s += `<circle cx="${r1(cx + (rnd() - 0.5) * cw * 0.62)}" cy="${r1(sy(v))}" r="2.8" fill="${PUB[k]}" fill-opacity="0.85" stroke="#000" stroke-width="0.6"/>`; });
-        s += `<path d="M${r1(cx - bw / 2)} ${r1(sy(med))}H${r1(cx + bw / 2)}" stroke="#000" stroke-width="2.2"/>`;
-      }
-      const name = c.name.length > 18 ? c.name.slice(0, 17) + '…' : c.name;
-      s += `<text x="${r1(cx)}" y="${t + ph + 17}" font-size="11" text-anchor="middle" fill="${esc(c.color)}" font-weight="700">${esc(name)}<title>${esc(c.name)}</title></text><text x="${r1(cx)}" y="${t + ph + 31}" font-size="10" text-anchor="middle" fill="#444">n=${vals.length}</text>`;
-    });
-  });
-  s += `<text x="16" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 16 ${t + ph / 2})">Hours per observed stage</text>`;
-  return s + '</svg>';
-}
-
-function figFractions(d, conds) {
-  const panels = [['G1', 'G1 (green)'], ['S', 'S (red)'], ['G2M', 'G2/M (yellow)']];
-  const pw = 250, ph = 190, gap = 46, l = 58, b = 48;
-  const legRows = Math.ceil(conds.length / 1);
-  const t = 40 + legRows * 16;
-  const W = l + panels.length * pw + (panels.length - 1) * gap + 16, H = t + ph + b;
-  const hours = d.hours, xmax = hours[hours.length - 1] || 1;
-  let s = svgOpen(W, H, 'Phase fractions over time');
-  let mx = 10;
-  conds.forEach((c) => panels.forEach(([k]) => (c.composition[k] || []).forEach((v) => { if (v != null) mx = Math.max(mx, v); })));
-  const ymax = niceMax(mx * 1.05, [20, 30, 40, 50, 60, 80, 100]);
-  const st = ymax <= 30 ? 5 : ymax <= 60 ? 10 : 20;
-  const ticks = []; for (let v = 0; v <= ymax + 1e-6; v += st) ticks.push(v);
-  panels.forEach(([k, title], pi) => {
-    const x0 = l + pi * (pw + gap);
-    const sx = (h) => x0 + h / xmax * pw, sy = (v) => t + ph - Math.min(v, ymax) / ymax * ph;
-    s += yAxis(x0, t, t + ph, ticks, sy) + xAxis(t + ph, x0, x0 + pw, timeTicks(xmax), sx);
-    s += `<text x="${x0 + pw / 2}" y="18" font-size="13" font-weight="700" text-anchor="middle" fill="#000">${title}</text>`;
-    s += `<text x="${x0 + pw / 2}" y="${H - 10}" font-size="12" text-anchor="middle" fill="#000">Time (h)</text>`;
-    conds.forEach((c) => {
-      const pts = [];
-      (c.composition[k] || []).forEach((v, j) => { if (v != null) pts.push(`${r1(sx(hours[j]))} ${r1(sy(v))}`); });
-      if (pts.length) s += `<path d="M${pts.join('L')}" fill="none" stroke="${esc(c.color)}" stroke-width="2" stroke-linejoin="round"${c.dashed ? ' stroke-dasharray="6 4"' : ''}/>`;
-    });
-    if (pi === 0) {  // legend between the first panel's title and its plot, so it never hides a line
-      conds.forEach((c, j) => {
-        const y = 36 + j * 16, lx = x0 + 8;
-        s += `<path d="M${lx} ${y - 4}H${lx + 22}" stroke="${esc(c.color)}" stroke-width="2"${c.dashed ? ' stroke-dasharray="6 4"' : ''}/><text x="${lx + 28}" y="${y}" font-size="11" fill="#000">${esc(c.name.length > 26 ? c.name.slice(0, 25) + '…' : c.name)} (n=${c.n})</text>`;
-      });
-    }
-  });
-  s += `<text x="16" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 16 ${t + ph / 2})">% of cells</text>`;
-  return s + '</svg>';
-}
-
-function figColonies(pop, conds) {
-  const panels = [['colonies', 'Colony number', 'Colonies per image'], ['colony_area', 'Average colony area', 'Mean colony area (µm²)']];
-  const pw = 280, ph = 200, gap = 70, l = 66, b = 48;
-  const byId = Object.fromEntries(pop.conditions.map((c) => [c.id, c]));
-  const rows = conds.filter((c) => byId[c.id] && byId[c.id].colonies);
-  const t = 40 + rows.length * 16;
-  const W = l + panels.length * pw + (panels.length - 1) * gap + 16, H = t + ph + b;
-  const hours = pop.hours, xmax = hours[hours.length - 1] || 1;
-  let s = svgOpen(W, H, 'Colonies over time');
-  panels.forEach(([k, title, ylab], pi) => {
-    const x0 = l + pi * (pw + gap);
-    let mx = 0;
-    rows.forEach((c) => byId[c.id][k].mean.forEach((v, j) => { if (v != null) mx = Math.max(mx, v + (byId[c.id][k].sem[j] || 0)); }));
-    const { ymax, ticks } = niceTicks(mx || 1);
-    const sx = (h) => x0 + h / xmax * pw, sy = (v) => t + ph - Math.min(v, ymax) / ymax * ph;
-    const fmt = (v) => (k === 'colony_area' && v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + 'k' : String(v));
-    s += yAxis(x0, t, t + ph, ticks, sy, fmt) + xAxis(t + ph, x0, x0 + pw, timeTicks(xmax), sx);
-    s += `<text x="${x0 + pw / 2}" y="18" font-size="13" font-weight="700" text-anchor="middle" fill="#000">${title}</text>`;
-    s += `<text x="${x0 + pw / 2}" y="${H - 10}" font-size="12" text-anchor="middle" fill="#000">Time (h)</text>`;
-    s += `<text x="${x0 - 50}" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 ${x0 - 50} ${t + ph / 2})">${ylab}</text>`;
-    rows.forEach((c) => {
-      const d = byId[c.id][k];
-      const up = [], lo = [], ln = [];
-      d.mean.forEach((v, j) => {
-        if (v == null) return;
-        const e = d.sem[j] || 0;
-        up.push(`${r1(sx(hours[j]))} ${r1(sy(v + e))}`); lo.push(`${r1(sx(hours[j]))} ${r1(sy(Math.max(0, v - e)))}`); ln.push(`${r1(sx(hours[j]))} ${r1(sy(v))}`);
-      });
-      if (!ln.length) return;
-      s += `<path d="M${up.join('L')}L${lo.reverse().join('L')}Z" fill="${esc(c.color)}" fill-opacity="0.18" stroke="none"/>`;
-      s += `<path d="M${ln.join('L')}" fill="none" stroke="${esc(c.color)}" stroke-width="2" stroke-linejoin="round"${c.dashed ? ' stroke-dasharray="6 4"' : ''}/>`;
-    });
-    if (pi === 0) {
-      rows.forEach((c, j) => {
-        const y = 36 + j * 16, lx = x0 + 8;
-        s += `<path d="M${lx} ${y - 4}H${lx + 22}" stroke="${esc(c.color)}" stroke-width="2"${c.dashed ? ' stroke-dasharray="6 4"' : ''}/><text x="${lx + 28}" y="${y}" font-size="11" fill="#000">${esc(c.name.length > 26 ? c.name.slice(0, 25) + '…' : c.name)} (${byId[c.id].wells.length} well${byId[c.id].wells.length === 1 ? '' : 's'})</text>`;
-      });
-    }
-  });
-  return s + '</svg>';
-}
-
-function figSection(id, title, sub, svg) {
-  return `<section class="card" aria-labelledby="${id}-h"><div class="card-head"><div><h2 id="${id}-h">${title}</h2><p>${sub}</p></div>
-      <button class="btn" data-save="${id}" data-name="${esc(title)}">${ICON.down} Save PNG + SVG</button></div>
-    <div class="fig-card" id="${id}">${svg}</div></section>`;
-}
-
-function experimentsCard(e, d) {
-  const own = `<div class="linked-row"><div><strong>${esc(e.settings.experiment_name || e.summary.folder.split('/').pop())}</strong> <span class="muted small">this experiment</span><div class="small muted mono">${esc(e.summary.folder)}</div></div></div>`;
-  const rows = (e.linked || []).map((l) => `<div class="linked-row"><div style="min-width:0"><strong>${esc(l.name)}</strong> ${l.ok ? `<span class="small muted">${esc((l.conditions || []).join(', '))}</span>` : `<span class="small" style="color:#F7DFA0">${esc(l.msg || '')}</span>`}<div class="small muted mono" style="overflow-wrap:anywhere">${esc(l.folder)}</div></div>
-      <button class="btn sm" data-unlink="${esc(l.folder)}">${ICON.x} Remove</button></div>`).join('');
-  return `<section class="card" aria-labelledby="ex-h"><div class="card-head"><div><h2 id="ex-h">Experiments in these figures</h2><p>Add other analysed experiments (another plate, another day) to compare them here and on the Population page. Conditions with the same name are pooled, wells stay the replicates, and time is in hours so different frame intervals line up. The other experiments are only read, never changed.</p></div>
-      <button class="btn" id="link-add">${ICON.plus} Add analysed experiment…</button></div>
-    <div>${own}${rows}</div>
-    <div id="link-manual" style="display:none;gap:10px;flex-wrap:wrap;align-items:center"><input class="input" id="link-path" placeholder="/Users/you/Incucyte/Other experiment" style="flex:1 1 360px"><button class="btn" id="link-go">Add</button></div></section>`;
-}
-
-function stylesCard(d) {
-  const rows = d.conditions.map((c, i) => `<div class="style-row" data-key="${esc(c.id)}">
-      <span style="display:flex;flex-direction:column;gap:2px"><button class="btn sm" data-move="-1" aria-label="Move ${esc(c.name)} up" ${i === 0 ? 'disabled' : ''} style="min-height:20px;padding:0 6px">▲</button><button class="btn sm" data-move="1" aria-label="Move ${esc(c.name)} down" ${i === d.conditions.length - 1 ? 'disabled' : ''} style="min-height:20px;padding:0 6px">▼</button></span>
-      <span style="display:flex;align-items:center;gap:10px;min-width:0"><input type="color" data-color value="${esc(c.color)}" aria-label="Colour of ${esc(c.name)}"><span style="min-width:0"><strong>${esc(c.name)}</strong> <span class="muted small">n=${c.n} cells${c.experiments.length > 1 ? ` · ${c.experiments.length} experiments` : ''}</span></span></span>
-      <label class="chip"><input type="checkbox" data-dashed ${c.dashed ? 'checked' : ''}>Dashed line</label>
-      <label class="chip"><input type="checkbox" data-show ${c.hidden ? '' : 'checked'}>Show</label>
-      <span></span></div>`).join('');
-  return `<section class="card tight" aria-labelledby="sty-h"><div class="card-head"><div><h2 id="sty-h">Conditions</h2><p>Order, colour and line style used in the figures and on the Population page. n is the number of founder cells (present in the first frame) followed through the movie.</p></div></div><div>${rows}</div></section>`;
-}
-
-async function renderFigures() {
-  if (!hasResults()) return needResults();
-  if (!S.fig.data) main.innerHTML = header(5, 'Figures') + '<p class="muted">Loading…</p>';
-  let d, pop;
-  try { [d, pop] = await Promise.all([api('figures'), api('population')]); } catch (e) { return fail(e); }
-  if (S.view !== 'figures') return;
-  S.fig.data = d;
-  const hasCol = pop.conditions.some((c) => c.colonies && c.colonies.mean.some((v) => v != null));
-  const e = S.st.experiment;
-  const shown = d.conditions.filter((c) => !c.hidden && c.n > 0);
-  const empty = '<p style="color:#444;padding:20px">No conditions to show. Assign wells on the plate map (step 1) or tick “Show” above.</p>';
-  main.innerHTML = header(5, 'Figures', `<button class="btn primary" id="fig-saveall">${ICON.down} Save all figures</button>`)
-    + experimentsCard(e, d) + stylesCard(d)
-    + figSection('fig-a', 'Cell-cycle composition over time', 'Every cell present in the first frame (a founder) is followed through its divisions, along one daughter each time. Colourless = neither reporter on; Unclassified = no longer tracked (lost or left the field).', shown.length ? figComposition(d, shown) : empty)
-    + figSection('fig-b', 'Time spent in each phase', 'Hours in each phase, for phases seen from start to end inside the movie. One dot per cell per phase; boxes show the median and quartiles, whiskers 1.5 × IQR. Every value is ± one frame interval.', shown.length ? figDurations(d, shown) : empty)
-    + figSection('fig-c', 'Phase fractions over time', 'Percent of the followed cells in each phase, per condition (same cells as the composition figure).', shown.length ? figFractions(d, shown) : empty)
-    + figSection('fig-d', 'Colonies over time', `From the confluence mask: touching cells form one colony; objects under ${num(S.st.experiment.settings.min_object_um2)} µm² are ignored as debris. Lines are the mean across wells, bands the SEM.`, !shown.length ? empty : hasCol ? figColonies(pop, shown) : '<p style="color:#444;padding:20px">No colony measurements yet: re-run the analysis.</p>')
-    + `<p class="small muted">Saved figures go to the “figures” folder inside “PIP-FUCCI results”: SVG for Illustrator or Inkscape, PNG at 3× for slides. The numbers behind them are in every table export (“Figure data”).</p>`;
-  bindFigures(d);
-}
-
-function bindFigures(d) {
-  const addLinked = async (path) => {
-    try { S.st = await api('link', { path }); markSaved(); S.fig.data = null; renderFigures(); toast('Experiment added.'); } catch (err) { fail(err); }
-  };
-  $('#link-add').onclick = async () => {
-    try {
-      let p;
-      const shell = window.pywebview && window.pywebview.api && window.pywebview.api.pick_folder;
-      if (shell) p = await window.pywebview.api.pick_folder(); else p = (await api('pick_folder', {})).path;
-      if (p) addLinked(p); else if (!S.st.native_dialogs) $('#link-manual').style.display = 'flex';
-    } catch (err) { fail(err); }
-  };
-  $('#link-go').onclick = () => addLinked($('#link-path').value.trim());
-  $$('[data-unlink]').forEach((b) => b.onclick = async () => { try { S.st = await api('unlink', { path: b.dataset.unlink }); markSaved(); renderFigures(); } catch (err) { fail(err); } });
-  const styles = () => {
-    const out = {};
-    $$('.style-row').forEach((row, i) => {
-      out[row.dataset.key] = { color: $('[data-color]', row).value, dashed: $('[data-dashed]', row).checked, hidden: !$('[data-show]', row).checked, order: i };
-    });
-    return out;
-  };
-  const save = async (st) => {
-    try { const r = await api('settings', { styles: { ...(S.st.experiment.settings.styles || {}), ...st } }); S.st = r.state; markSaved(); renderFigures(); } catch (err) { fail(err); }
-  };
-  $$('.style-row input').forEach((inp) => inp.onchange = () => save(styles()));
-  $$('.style-row [data-move]').forEach((b) => b.onclick = () => {
-    const row = b.closest('.style-row');
-    const sib = +b.dataset.move < 0 ? row.previousElementSibling : row.nextElementSibling;
-    if (!sib) return;
-    if (+b.dataset.move < 0) row.parentNode.insertBefore(row, sib); else row.parentNode.insertBefore(sib, row);
-    save(styles());
-  });
-  $$('[data-save]').forEach((b) => b.onclick = async () => { b.disabled = true; await saveFigure(b.dataset.save, b.dataset.name, true); b.disabled = false; });
-  $('#fig-saveall').onclick = async () => {
-    let last = null;
-    for (const b of $$('[data-save]')) last = await saveFigure(b.dataset.save, b.dataset.name, false) || last;
-    if (last) toast(`Saved ${$$('[data-save]').length} figures (PNG + SVG).`, { action: { label: 'Show in Finder', fn: () => api('reveal', { path: last.folder }).catch(fail) }, ms: 12000 });
-  };
-}
-
-function svgToPng(svgText, scale = 3) {
-  return new Promise((resolve, reject) => {
-    const m = /width="(\d+(?:\.\d+)?)" height="(\d+(?:\.\d+)?)"/.exec(svgText);
-    const w = m ? +m[1] : 800, h = m ? +m[2] : 400;
-    const img = new Image();
-    img.onload = () => {
-      const cv = document.createElement('canvas');
-      cv.width = Math.round(w * scale); cv.height = Math.round(h * scale);
-      const ctx = cv.getContext('2d');
-      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
-      ctx.drawImage(img, 0, 0, cv.width, cv.height);
-      try { resolve(cv.toDataURL('image/png')); } catch (e) { reject(e); }
-    };
-    img.onerror = () => reject(new Error('Could not draw the figure as PNG'));
-    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
-  });
-}
-
-async function saveFigure(id, name, announce) {
-  const el = $('#' + id + ' svg');
-  if (!el) return null;
-  const svg = '<?xml version="1.0" encoding="UTF-8"?>\n' + el.outerHTML;
-  let png = null;
-  try { png = await svgToPng(el.outerHTML); } catch (e) { /* SVG still saved */ }
-  try {
-    const r = await api('save_figure', { name, svg, png });
-    if (announce) toast(`Saved “${name}” (${png ? 'PNG + SVG' : 'SVG'}).`, { action: { label: 'Show in Finder', fn: () => api('reveal', { path: r.path }).catch(fail) }, ms: 12000 });
-    return r;
-  } catch (e) { fail(e); return null; }
-}
+IX.onDot = (key) => openTrack(key, false);
 
 // ---------------------------------------------------------------- keyboard + resize
 document.addEventListener('keydown', (ev) => {

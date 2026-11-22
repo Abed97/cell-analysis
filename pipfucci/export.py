@@ -148,5 +148,9 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
         "ending at the last frame, or at the field edge are censored and left out of durations.\n"
         "Statistics should be run on well means (biological replicates), never on individual cells.\n"
         "Settings and versions.json records everything used to make these numbers.\n"
+        + (("\nLeft out of the results (blurry images): "
+            + ", ".join(x.replace("_", " field ") for x in exp.settings.excluded)
+            + ".\nTheir cells are still in 'Cells per frame.csv' and 'Tracks.csv', marked excluded = True.\n")
+           if exp.settings.excluded else "")
     )
     return out

@@ -196,3 +196,26 @@ table.dur td:last-child { text-align: right; font-family: var(--mono); }
 .linked-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; padding: 10px 0; border-top: 1px solid #23282D; font-size: 13px; }
 .spin-dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid #9CC2FF; border-right-color: transparent; animation: spin 0.9s linear infinite; }
 @media (prefers-reduced-motion: reduce) { .spin-dot { animation: none; } }
+.ichart { position: relative; cursor: crosshair; touch-action: pan-y; }
+.ichart svg { user-select: none; -webkit-user-select: none; }
+.ix-reset { position: absolute; top: 4px; right: 4px; min-height: 24px; padding: 0 9px; border-radius: 12px; border: 1px solid #59626C;
+  background: rgba(23,27,31,0.92); color: #E7E9EC; font-size: 11px; cursor: pointer; }
+.fig-card .ix-reset { background: #FFFFFF; color: #111; border-color: #BBB; }
+.ix-reset:hover { border-color: #9CC2FF; }
+#ix-tip { position: fixed; z-index: 50; pointer-events: none; min-width: 140px; max-width: 320px; padding: 8px 10px; border-radius: 8px;
+  background: rgba(16,19,22,0.96); border: 1px solid #3A4148; color: #E7E9EC; font-size: 12px; line-height: 1.35;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 3px; }
+#ix-tip[hidden] { display: none; }
+#ix-tip .h { font-weight: 600; display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+#ix-tip .r { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+#ix-tip .r:not(:has(.sw)) { grid-template-columns: minmax(0, 1fr) auto; }
+#ix-tip .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+#ix-tip .n { color: #C9D1DA; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#ix-tip .v { font-family: var(--mono); color: #FFFFFF; text-align: right; white-space: nowrap; }
+#ix-tip .m { color: #A0A8B2; font-size: 11px; }
+.leg-btn { display: inline-flex; align-items: center; gap: 6px; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 6px;
+  color: inherit; font: inherit; cursor: pointer; }
+.leg-btn:hover { border-color: #3A4148; }
+.leg-btn[aria-pressed="false"] { opacity: 0.4; text-decoration: line-through; }
+.well.excluded { background-image: linear-gradient(45deg, transparent 44%, #FF6B6B 44% 56%, transparent 56%), linear-gradient(-45deg, transparent 44%, #FF6B6B 44% 56%, transparent 56%) !important; }
+.ex-flag { position: absolute; left: 50%; transform: translateX(-50%); top: 12px; padding: 6px 10px; border-radius: 6px; background: rgba(120,20,20,0.85); color: #fff; font-size: 12px; font-weight: 600; pointer-events: none; }

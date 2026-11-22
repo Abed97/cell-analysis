@@ -33,6 +33,7 @@ class Settings:
     gate_red: float | None = None
     experiment_name: str = ""
     linked: list = field(default_factory=list)  # other analysed experiment folders shown alongside this one
+    excluded: list = field(default_factory=list)  # wells ("B2") or fields ("B2_1") left out of results (blurry)
     styles: dict = field(default_factory=dict)  # figure style per condition name: color, dashed, order, hidden
 
     # ---------- derived ----------
@@ -162,6 +163,10 @@ class Settings:
             self.sensitivity = float(min(1.0, max(0.0, float(self.sensitivity))))
         except Exception:
             self.sensitivity = 0.5
+        if not isinstance(self.excluded, list):
+            self.excluded = []
+        self.excluded = sorted({str(x) for x in self.excluded if isinstance(x, str) and x},
+                               key=lambda x: (x[0], int("".join(ch for ch in x[1:].split("_")[0] if ch.isdigit()) or 0), x))
         if not isinstance(self.styles, dict):
             self.styles = {}
         if not isinstance(self.linked, list):

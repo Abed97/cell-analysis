@@ -33,14 +33,14 @@ def _active(exp: Experiment) -> pd.DataFrame:
 def _conditions(exp: Experiment):
     s = exp.settings
     out = []
-    present = set(exp.index["wells"])
+    present = set(exp.index["wells"]) - exp.excluded_wells()
     for cnd in s.conditions:
         wells = [w for w, cid in s.wells.items() if cid == cnd["id"] and w in present and w != s.parental_well]
         wells.sort(key=lambda w: (w[0], int(w[1:])))
         if wells:
             out.append({**cnd, "wells": wells})
     assigned = set(s.wells)
-    rest = [w for w in exp.index["wells"] if w not in assigned and w != s.parental_well]
+    rest = [w for w in exp.index["wells"] if w not in assigned and w != s.parental_well and w in present]
     if rest:
         out.append({"id": "_unassigned", "name": "Unassigned", "color": "#A0A8B2", "wells": rest})
     return out
@@ -64,7 +64,7 @@ def well_series(exp: Experiment) -> dict:
         col_a = np.full(n_frames, np.nan)
         confs, ns, areas = [], [], []
         for m in exp.meta.get("movies", {}).values():
-            if m["well"] == well:
+            if m["well"] == well and not exp.movie_excluded(m["well"], m["field"]):
                 arrs = [np.full(n_frames, np.nan) for _ in range(3)]
                 for f, v, n, a in zip(m["frames"], m["confluence"], m.get("colonies") or [None] * len(m["frames"]),
                                       m.get("colony_area") or [None] * len(m["frames"])):
@@ -131,7 +131,11 @@ def population(exp: Experiment) -> dict:
 
 def scatter(exp: Experiment, frame: int, well: str | None = None, field: int | None = None,
             condition: str | None = None, max_points: int = 3000) -> dict:
-    c = _real(_active(exp))
+    if well:  # the viewer's own field: shown even when the field is excluded from results
+        flagged = {k for k, v in exp.flags.items() if v.get("excluded")}
+        c = _real(exp.cells[~exp.cells["track"].isin(flagged)] if flagged else exp.cells)
+    else:
+        c = _real(_active(exp))
     sub = c[c["frame"] == frame]
     if well:
         sub = sub[sub["well"] == well]
@@ -197,6 +201,9 @@ def tracks_overview(exp: Experiment, condition: str | None = None, well: str | N
                     sort: str = "division", min_frames: int = 3, limit: int = 400) -> dict:
     t = exp.tracks
     sel = t[t["n"] >= min_frames]
+    hidden = exp.tracks_in_excluded()  # excluded wells/fields: not listed at all
+    if hidden:
+        sel = sel[~sel.index.isin(hidden)]
     if well:
         sel = sel[sel["well"] == well]
     elif condition:
@@ -280,6 +287,7 @@ def durations_for(exp: Experiment, wells: list[str]) -> dict:
     sel = t[t["well"].isin(wells) & ~t.index.isin(ex)]
     sub = c[c["track"].isin(sel.index)].sort_values(["track", "frame"])
     vals = {p: [] for p in PH}
+    keys = {p: [] for p in PH}  # which cell each value comes from
     censored = {p: 0 for p in PH}
     cycles = []
     for key, g in sub.groupby("track", sort=False):
@@ -289,11 +297,13 @@ def durations_for(exp: Experiment, wells: list[str]) -> dict:
             ok = (i > 0 or r["start_known"]) and (i < len(segs) - 1 or r["end_known"])
             if ok:
                 vals[PH[p]].append(round((b - a + 1) * ih, 3))
+                keys[PH[p]].append(key)
             else:
                 censored[PH[p]] += 1
         if r["start_known"] and r["end_known"]:
             cycles.append(round((int(r["end"]) - int(r["start"]) + 1) * ih, 3))
-    return {"values": vals, "cycle": cycles, "censored": censored, "n_tracks": int(len(sel)), "precision_h": ih}
+    return {"values": vals, "keys": keys, "cycle": cycles, "censored": censored, "n_tracks": int(len(sel)),
+            "precision_h": ih}
 
 
 def durations_by_condition(exp: Experiment) -> dict:
@@ -301,7 +311,7 @@ def durations_by_condition(exp: Experiment) -> dict:
     for cnd in _conditions(exp):
         d = durations_for(exp, cnd["wells"])
         med = {p: (float(np.median(v)) if v else None) for p, v in d["values"].items()}
-        out.append({"id": cnd["id"], "name": cnd["name"], "color": cnd["color"], "values": d["values"],
+        out.append({"id": cnd["id"], "name": cnd["name"], "color": cnd["color"], "values": d["values"], "keys": d["keys"],
                     "cycle": d["cycle"], "median": med,
                     "median_cycle": float(np.median(d["cycle"])) if d["cycle"] else None,
                     "censored": d["censored"], "n_tracks": d["n_tracks"]})

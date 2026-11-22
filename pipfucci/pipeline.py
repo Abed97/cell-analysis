@@ -46,7 +46,7 @@ class MovieMasks:
         self.files = {}
         path = Path(path)
         if path.is_dir():
-            sources = sorted(path.glob("*.npz"))
+            sources = sorted(path.glob("chunk_*.npz"))
         elif path.with_suffix(".npz").exists():  # results from before chunking
             sources = [path.with_suffix(".npz")]
         else:
@@ -182,6 +182,7 @@ def measure_movie(mask_dir, frames, min_halfpx: float, halfpx_um2: float, progre
     (half resolution), ignoring objects smaller than the debris size."""
     masks = MovieMasks(mask_dir)
     out = {"confluence": [], "colonies": [], "colony_area": []}
+    each = {}
     for f in frames:
         m = masks.cells(f)
         if m is None:
@@ -194,12 +195,32 @@ def measure_movie(mask_dir, frames, min_halfpx: float, halfpx_um2: float, progre
             out["confluence"].append(tot / m.size)
             out["colonies"].append(k)
             out["colony_area"].append(tot * halfpx_um2 / k if k else None)
+            each[f"f{int(f)}"] = np.round(sizes[keep] * halfpx_um2).astype(np.int32)
         if progress_q is not None:
             try:
                 progress_q.put(1)
             except Exception:
                 pass
+    save_colony_sizes(mask_dir, each)
     return out
+
+
+def save_colony_sizes(mask_dir, each: dict) -> None:
+    """Area (µm²) of every colony in every frame, for box plots: colony_sizes.npz next to the masks."""
+    d = Path(mask_dir)
+    if not d.is_dir():
+        return
+    tmp = d / "colony_sizes.tmp.npz"
+    np.savez_compressed(tmp, **each)
+    tmp.replace(d / "colony_sizes.npz")
+
+
+def load_colony_sizes(mask_dir) -> dict:
+    p = Path(mask_dir) / "colony_sizes.npz"
+    if not p.exists():
+        return {}
+    with np.load(p) as z:
+        return {int(k[1:]): z[k] for k in z.files}
 
 
 def threshold_job(job: dict) -> float | None:

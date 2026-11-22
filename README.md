@@ -66,10 +66,28 @@ affected; they live next to the images.
    the Figures and Population pages; conditions with the same name are pooled, wells stay the
    replicates.
 
+**Graphs are interactive** (Population, Single cells, Figures): hover for values, drag across a
+time range to zoom (pinch zooms too, a sideways swipe pans), double-click or *Reset zoom* to go
+back. On the Population page all charts zoom together and clicking a condition in the legend hides
+or shows it. On box and dot plots, hover a box for median, quartiles and n; click a dot to open
+that cell in Single cells.
+
+**Leaving out blurry images:** on the plate map choose *Exclude wells (blurry)* and click wells,
+or in Segment & gate set *Use in results* to *Not this field* / *Not well B2*. Nothing is
+re-analysed; those wells and fields are left out of every chart, figure and Prism table, and are
+marked `excluded` in the per-cell and per-track tables.
+
+**Export all graphs & figures** (Figures page or the Export card) writes every figure as PNG (3×)
+and SVG into one dated folder in `PIP-FUCCI results/figures/`: composition, phase durations, phase
+fractions (followed cells and all cells), growth and confluence, colonies (lines and box plots) and
+red-vs-green plots.
+
 **Confluence and colonies** come from a phase-contrast mask of every cell, coloured or not.
 Objects smaller than *Smallest object counted* (step 2, default 50 µm²) are debris: drawn with an
 orange outline and left out. Touching cells form one colony; the Population and Figures pages
-plot colony number per image and average colony area over time. Changing the debris size only
+plot colony number per image and average colony area over time, as lines (mean ± SEM across
+wells) or as box plots at regular time points (colonies per image, and the area of every colony,
+optionally on a log scale). Changing the debris size only
 re-measures from the saved masks (seconds), it doesn't re-run the analysis.
 
 **While it runs** the top bar and the Dock icon show the progress, the Mac doesn't nap or sleep, and

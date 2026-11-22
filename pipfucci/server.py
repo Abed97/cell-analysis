@@ -149,6 +149,7 @@ def experiment_state(exp) -> dict:
         "run": exp.meta.get("run", {}).get("finished") if exp.has_results else None,
         "floor": exp.meta.get("floor"),
         "old_format": bool(exp.has_results and "interp" not in exp.cells.columns),
+        "excluded_wells": sorted(exp.excluded_wells()),
         "linked": linked_info(exp),
         "saved_at": _saved_at(exp),
     }
@@ -264,7 +265,7 @@ def open_folder(path: str):
     exp.save()
     STATE.add_recent(exp)
     # analysed before colonies existed: measure them from the saved masks (seconds, no re-run)
-    if (exp.has_results and exp.stale is None and "measured_min_object_um2" not in exp.meta
+    if (exp.has_results and exp.stale is None and exp.meta.get("colony_sizes") != 1
             and (exp.results_dir / "masks").is_dir() and not STATE.progress.get("running")):
         try:
             run_remeasure()
@@ -382,16 +383,20 @@ def save_figure(b: dict) -> dict:
     exp = need_results()
     name = re.sub(r"[^A-Za-z0-9 _().+-]+", "_", str(b.get("name") or "figure")).strip() or "figure"
     out = exp.results_dir / "figures"
+    stamp = " " + time.strftime("%Y-%m-%d %H%M%S")
+    if b.get("folder"):  # "Export all": one dated folder, plain file names
+        sub = re.sub(r"[^A-Za-z0-9 _().+-]+", "_", str(b["folder"])).strip() or "All graphs"
+        out = out / sub
+        stamp = ""
     out.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y-%m-%d %H%M%S")
     written = []
     if b.get("svg"):
-        p = out / f"{name} {stamp}.svg"
+        p = out / f"{name}{stamp}.svg"
         p.write_text(b["svg"], encoding="utf-8")
         written.append(p)
     if b.get("png"):
         data = b["png"].split(",", 1)[-1]
-        p = out / f"{name} {stamp}.png"
+        p = out / f"{name}{stamp}.png"
         p.write_bytes(base64.b64decode(data))
         written.append(p)
     if not written:
@@ -522,7 +527,8 @@ class Handler(BaseHTTPRequestHandler):
             if ep == "scatter":
                 exp = need_results()
                 fld = int(q["field"]) if q.get("field") else None
-                return self._json(analysis.scatter(exp, int(q["frame"]), q.get("well") or None, fld, q.get("condition") or None))
+                return self._json(analysis.scatter(exp, int(q["frame"]), q.get("well") or None, fld, q.get("condition") or None,
+                                                   max_points=int(q.get("max") or 3000)))
             if ep == "stats":
                 exp = need_results()
                 return self._json(analysis.detection_stats(exp, q["well"], int(q["field"]), int(q["frame"])))
@@ -530,6 +536,11 @@ class Handler(BaseHTTPRequestHandler):
                 from . import compare
 
                 return self._json(compare.population(all_exps(need_results())))
+            if ep == "colony_dist":
+                from . import compare
+
+                ev = float(q["every"]) if q.get("every") else None
+                return self._json(compare.colony_dist(all_exps(need_results()), ev))
             if ep == "figures":
                 from . import compare
 

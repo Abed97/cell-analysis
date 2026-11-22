@@ -227,3 +227,44 @@ def test_worker_pool_survives_a_dead_worker(tmp_path):
     with WorkerPool(4) as pool:
         assert pool.map(_die_once, jobs, threading.Event()) == [0, 10, 20, 30, 40, 50]
     assert (tmp_path / "died").exists()
+
+
+def test_excluding_wells_and_fields(exp):
+    from pipfucci import compare
+
+    pop = analysis.population(exp)
+    assert [c["wells"] for c in pop["conditions"]] == [["B2"], ["C2"]]
+    exp.update_settings({"excluded": ["B2"]})
+    try:
+        assert exp.excluded_wells() == {"B2"}
+        pop = analysis.population(exp)
+        assert [c["wells"] for c in pop["conditions"]] == [["C2"]]
+        assert all(exp.tracks.loc[k, "well"] == "B2" or exp.flags.get(k, {}).get("excluded")
+                   for k in exp.excluded_tracks())
+        rows = analysis.tracks_overview(exp)["rows"]
+        assert rows and not any(r["key"].startswith("B2-") for r in rows)
+        fig = compare.figures([exp])
+        assert [c["name"] for c in fig["conditions"] if c["n"]] == ["Fast cycling"]
+        dist = compare.colony_dist([exp])
+        assert [c["name"] for c in dist["conditions"]] == ["Fast cycling"]
+        # the viewer still shows the excluded field's own cells on the gate plot
+        assert analysis.scatter(exp, 3, well="B2", field=1)["n"] > 0
+        # a single field: here the only field, so the whole well drops out
+        exp.update_settings({"excluded": ["C2_1"]})
+        assert exp.excluded_wells() == {"C2"}
+        assert [c["wells"] for c in analysis.population(exp)["conditions"]] == [["B2"]]
+    finally:
+        exp.update_settings({"excluded": []})
+    assert len(analysis.population(exp)["conditions"]) == 2
+
+
+def test_colony_box_plot_data(exp):
+    from pipfucci import compare
+
+    d = compare.colony_dist(exp_list := [exp], every_h=6)
+    assert d["times"] == [0.0, 6.0, 12.0, 18.0, 24.0]
+    for c in d["conditions"]:
+        st = c["areas"][0]["stats"]
+        assert st and st["n"] >= 1 and st["q1"] <= st["med"] <= st["q3"]
+        assert c["counts"][0]["values"] and c["counts"][0]["labels"][0].endswith("field 1")
+    assert exp_list

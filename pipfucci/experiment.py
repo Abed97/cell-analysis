@@ -482,6 +482,7 @@ class Experiment:
                 m["colonies"] = r["colonies"]
                 m["colony_area"] = r["colony_area"]
             self.meta["measured_min_object_um2"] = self.settings.min_object_um2
+            self.meta["colony_sizes"] = 1
             save_json(self.results_dir / "meta.json", self.meta)
         progress(stage="Done", done=total, total=total, fraction=1.0, eta_s=0)
 
@@ -524,6 +525,7 @@ class Experiment:
         self.meta = {
             "movies": movies_meta,
             "measured_min_object_um2": self.settings.min_object_um2,
+            "colony_sizes": 1,
             "parents": parents,
             "low_conf": sorted(low_conf),
             "times_min": self.index["times_min"],
@@ -670,8 +672,41 @@ class Experiment:
         self.save_flags()
         return f
 
+    def excluded_wells(self) -> set:
+        """Wells left out of results: listed whole, or with every field excluded."""
+        ex = set(self.settings.excluded)
+        out = {x for x in ex if "_" not in x}
+        fields: dict = {}
+        for m in self.meta.get("movies", {}).values() if self.meta else []:
+            fields.setdefault(m["well"], []).append(f"{m['well']}_{m['field']}")
+        for w, fs in fields.items():
+            if fs and all(f in ex for f in fs):
+                out.add(w)
+        return out
+
+    def movie_excluded(self, well: str, field) -> bool:
+        ex = self.settings.excluded
+        return well in ex or f"{well}_{int(field)}" in ex or well in self.excluded_wells()
+
+    def tracks_in_excluded(self) -> set:
+        """Tracks in wells or fields marked as excluded (blurry images), cached per settings."""
+        key = (tuple(self.settings.excluded), id(self.tracks), len(self.tracks) if self.tracks is not None else 0)
+        if getattr(self, "_ex_key", None) == key:
+            return self._ex_set
+        out = set()
+        if self.tracks is not None and len(self.tracks) and self.settings.excluded:
+            t = self.tracks
+            wells = self.excluded_wells()
+            fld = t["well"].astype(str) + "_" + t["field"].astype(int).astype(str)
+            out = set(t.index[t["well"].isin(wells) | fld.isin(set(self.settings.excluded))])
+        self._ex_key, self._ex_set = key, out
+        return out
+
     def excluded_tracks(self) -> set:
-        return {k for k, v in self.flags.items() if v.get("excluded")}
+        """Tracks left out of results: flagged one by one, or in an excluded well or field."""
+        flagged = {k for k, v in self.flags.items() if v.get("excluded")}
+        ex = self.tracks_in_excluded()
+        return flagged | ex if ex else flagged
 
 
 def run_info(exp: Experiment) -> dict:
