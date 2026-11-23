@@ -36,7 +36,8 @@ The settings (gear icon, top right) has **Check for updates automatically** and 
 updates automatically** (both on by default). With automatic installs on, the app switches to a
 downloaded version the next time it opens, or after a minute without use when no analysis is
 running. **Check now** looks for a new version immediately. The same window sets how many
-processor cores the analysis uses (Auto = all but one, limited by memory).
+processor cores the analysis uses (Auto = all but one, about 0.3 GB each with 3 GB kept free for
+macOS and other apps, so an 8 GB Mac uses 7 of its 8 cores; Settings shows the number).
 
 No password, no "Open Anyway" again: the copy in Applications is never touched. New versions
 live in `~/Library/Application Support/PIP-FUCCI/versions/`; the installed app hands over to the
@@ -107,7 +108,8 @@ re-measures from the saved masks (seconds), it doesn't re-run the analysis.
 
 **While it runs** the top bar and the Dock icon show the progress, the Mac doesn't nap or sleep, and
 a notification plus a Dock bounce say when it's done (turn off in Settings). Frames are processed
-on several cores; if one worker process dies (for example memory runs out), its frames are retried
+on several cores (per-nucleus measurements use the nucleus pixels only, about a third faster per
+image than before v0.1.14); if one worker process dies (for example memory runs out), its frames are retried
 with fewer workers instead of stopping.
 
 Everything is saved automatically (settings, plate map, gates, track flags, results) in

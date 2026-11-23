@@ -38,8 +38,20 @@ class Cancelled(Exception):
     pass
 
 
-def worker_count(n_jobs: int = 10 ** 6, setting=None) -> int:
-    """Worker processes: all cores but one, capped by memory (about 1.5 GB each for 1408x1040 movies)."""
+STD_IMAGE_PX = 1408 * 1040
+WORKER_GB = 0.6   # one worker peaks near 0.3 GB on 1408x1040 images (dense fields, 190-frame movies); 2x margin
+RESERVE_GB = 3.0  # left for macOS, this window and other open apps
+
+
+def worker_gb(image_px: int | None = None, method: str = "classic") -> float:
+    """Memory to plan per worker process: grows with image size; Cellpose needs much more."""
+    scale = max(1.0, (image_px or STD_IMAGE_PX) / STD_IMAGE_PX)
+    return (2.0 if method == "cellpose" else WORKER_GB) * scale
+
+
+def worker_count(n_jobs: int = 10 ** 6, setting=None, per_worker_gb: float = WORKER_GB) -> int:
+    """Worker processes: all cores but one, capped by memory (per_worker_gb each, RESERVE_GB kept free).
+    An 8 GB Mac gets 7 workers on 1408x1040 images (it was held to 4 by an older 1.5 GB estimate)."""
     if setting not in (None, "auto"):
         try:
             return max(1, min(int(setting), n_jobs))
@@ -49,7 +61,7 @@ def worker_count(n_jobs: int = 10 ** 6, setting=None) -> int:
     n = max(1, cpus - 1)
     try:
         mem_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
-        n = min(n, max(1, int((mem_gb - 2.0) // 1.5)))
+        n = min(n, max(1, int((mem_gb - RESERVE_GB) // per_worker_gb)))
     except Exception:
         pass
     return max(1, min(n, 12, n_jobs))
@@ -330,6 +342,14 @@ class Experiment:
             "halfpx_um2": (2 * s.pixel_um) ** 2,
         }
 
+    def worker_gb(self) -> float:
+        img = (self.index or {}).get("image") or {}
+        try:
+            px = int(img.get("width", 0)) * int(img.get("height", 0)) or None
+        except Exception:
+            px = None
+        return worker_gb(px, getattr(self.settings, "method", "classic"))
+
     # ------------------------------------------------------------ run
     def _jobs(self):
         """Chunk jobs for segmentation. Masks of a new run go to masks.new and replace the old ones
@@ -389,7 +409,7 @@ class Experiment:
             progress(stage=stage, done=state["done"], total=total, unit="frames",
                      fraction=min(0.02 + 0.88 * seg_frac, 0.99), eta_s=eta, workers=workers)
 
-        workers = workers or worker_count(len(chunk_jobs))
+        workers = workers or worker_count(len(chunk_jobs), per_worker_gb=self.worker_gb())
         try:
             with WorkerPool(workers) as pool:
                 # one confluence threshold per field, from its first and middle frames
@@ -500,7 +520,7 @@ class Experiment:
                      fraction=frac * 0.9, eta_s=(el / frac - el) if frac > 0.03 else None, workers=workers)
 
         progress(stage="Redrawing confluence", done=0, total=total, unit="images", fraction=0.0, eta_s=None)
-        workers = workers or worker_count(len(jobs))
+        workers = workers or worker_count(len(jobs), per_worker_gb=self.worker_gb())
         with WorkerPool(workers) as pool:
             ref_of = dict(zip([r["movie"] for r in refs], pool.map(threshold_job, refs, cancel)))
             for j in jobs:
@@ -531,7 +551,7 @@ class Experiment:
                      fraction=min(0.99, state["done"] / max(1, total)), eta_s=None)
 
         progress(stage="Measuring confluence", done=0, total=total, unit="frames", fraction=0.0, eta_s=None)
-        workers = workers or worker_count(len(jobs))
+        workers = workers or worker_count(len(jobs), per_worker_gb=self.worker_gb())
         with WorkerPool(workers if total > 400 else 1) as pool:
             res = pool.map(measure_job, jobs, cancel, on_frame=tick)
         with self.lock:

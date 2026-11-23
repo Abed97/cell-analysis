@@ -189,29 +189,46 @@ def segment_cellpose(red, green, nucleus_px, scales=None):  # pragma: no cover -
 
 # ---------------------------------------------------------------- quantification
 def quantify(labels: np.ndarray, red: np.ndarray | None, green: np.ndarray | None, edge_margin: float) -> dict:
+    """Area, centre, mean and median red/green of every nucleus. Works on the nucleus pixels only
+    (one sort for all medians), which is many times faster than scipy's per-label statistics on
+    the whole image and gives the same numbers."""
     n = int(labels.max())
     if n == 0:
         return {k: np.zeros(0) for k in ("label", "y", "x", "area", "red", "green", "red_med", "green_med", "edge")}
     idx = np.arange(1, n + 1)
-    area = ndi.sum_labels(np.ones_like(labels, dtype=np.float32), labels, idx)
-    cy, cx = np.array(ndi.center_of_mass(np.ones_like(labels, dtype=np.float32), labels, idx)).T
+    fg = labels > 0
+    lab = labels[fg].astype(np.intp)
+    yy, xx = np.nonzero(fg)
+    cnt = np.bincount(lab, minlength=n + 1)[1:]
+    area = cnt.astype(np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cy = np.bincount(lab, yy, minlength=n + 1)[1:] / area
+        cx = np.bincount(lab, xx, minlength=n + 1)[1:] / area
+    has = cnt > 0
+    start = np.concatenate(([0], np.cumsum(cnt)[:-1]))
+    lo = start + (cnt - 1) // 2
+    hi = start + cnt // 2
+
     def meanof(img):
         if img is None:
             return np.full(n, np.nan)
-        return np.asarray(ndi.mean(img, labels, idx), dtype=np.float32)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return (np.bincount(lab, img[fg].astype(np.float64), minlength=n + 1)[1:] / area).astype(np.float32)
+
     def medof(img):
         if img is None:
             return np.full(n, np.nan)
-        return np.asarray(ndi.median(img, labels, idx), dtype=np.float32)
+        v = img[fg].astype(np.float64)
+        v = v[np.lexsort((v, lab))]
+        out = np.full(n, np.nan)
+        out[has] = (v[lo[has]] + v[hi[has]]) / 2
+        return out.astype(np.float32)
+
     h, w = labels.shape
     # touches the border or is within the margin
-    objs = ndi.find_objects(labels)
-    edge = np.zeros(n, bool)
-    for i, sl in enumerate(objs):
-        if sl is None:
-            continue
-        if sl[0].start <= 0 or sl[1].start <= 0 or sl[0].stop >= h or sl[1].stop >= w:
-            edge[i] = True
+    edge = np.zeros(n + 1, bool)
+    edge[np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1]))] = True
+    edge = edge[1:]
     edge |= (cx < edge_margin) | (cy < edge_margin) | (cx > w - 1 - edge_margin) | (cy > h - 1 - edge_margin)
     return {
         "label": idx.astype(np.int32),

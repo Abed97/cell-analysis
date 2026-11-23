@@ -275,6 +275,21 @@ def open_folder(path: str):
     return state()
 
 
+def _core_info() -> dict:
+    """Cores on this Mac, its memory and what Auto would use (for the open experiment's image size)."""
+    from .experiment import WORKER_GB, worker_count
+
+    try:
+        per = STATE.exp.worker_gb() if STATE.exp is not None else WORKER_GB
+    except Exception:
+        per = WORKER_GB
+    try:
+        mem = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2 ** 30)
+    except Exception:
+        mem = None
+    return {"cpus": os.cpu_count() or 1, "auto_workers": worker_count(per_worker_gb=per), "mem_gb": mem}
+
+
 def pick_folder():
     w = STATE.window
     if w is not None:
@@ -563,7 +578,7 @@ class Handler(BaseHTTPRequestHandler):
             if ep == "prefs":
                 from .updater import load_prefs
 
-                return self._json({**load_prefs(), "cpus": os.cpu_count() or 1})
+                return self._json({**load_prefs(), **_core_info()})
             if ep == "tracks":
                 exp = need_results()
                 return self._json(analysis.tracks_overview(exp, q.get("condition") or None, q.get("well") or None,
@@ -648,7 +663,7 @@ class Handler(BaseHTTPRequestHandler):
             if ep == "prefs":
                 from .updater import save_prefs
 
-                return self._json({**save_prefs(b), "cpus": os.cpu_count() or 1})
+                return self._json({**save_prefs(b), **_core_info()})
             if ep == "check_updates":
                 from .updater import UPDATER
 

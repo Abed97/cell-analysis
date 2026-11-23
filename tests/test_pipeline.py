@@ -350,3 +350,68 @@ def test_figure_axes_setting(exp):
     exp.update_settings({"fig_axes": {"fig-a": {"x": {"min": "0", "max": 12, "step": -2}, "y": {}}, "x": 5}})
     assert exp.settings.fig_axes == {"fig-a": {"x": {"min": 0.0, "max": 12.0}}}
     exp.update_settings({"fig_axes": {}})
+
+
+def _quantify_scipy(labels, red, green, edge_margin):
+    """The previous per-label scipy implementation, kept as the reference."""
+    from scipy import ndimage as ndi
+
+    n = int(labels.max())
+    idx = np.arange(1, n + 1)
+    ones = np.ones_like(labels, dtype=np.float32)
+    cy, cx = np.array(ndi.center_of_mass(ones, labels, idx)).T
+    h, w = labels.shape
+    edge = np.zeros(n, bool)
+    for i, sl in enumerate(ndi.find_objects(labels)):
+        if sl is not None and (sl[0].start <= 0 or sl[1].start <= 0 or sl[0].stop >= h or sl[1].stop >= w):
+            edge[i] = True
+    edge |= (cx < edge_margin) | (cy < edge_margin) | (cx > w - 1 - edge_margin) | (cy > h - 1 - edge_margin)
+    out = {"label": idx, "y": cy, "x": cx, "area": ndi.sum_labels(ones, labels, idx), "edge": edge}
+    for name, img in (("red", red), ("green", green)):
+        out[name] = np.full(n, np.nan) if img is None else ndi.mean(img, labels, idx)
+        out[name + "_med"] = np.full(n, np.nan) if img is None else ndi.median(img, labels, idx)
+    return out
+
+
+def test_quantify_matches_scipy(exp):
+    from scipy import ndimage as ndi
+
+    from pipfucci import io_incucyte as io
+    from pipfucci import segment as seg
+
+    sd = exp.derived_numbers()
+    jobs, _, _ = exp._jobs()
+    exp._discard_new_masks()
+    cases = []
+    for f in jobs[0]["frames"][:3]:
+        p = jobs[0]["paths"][f]
+        r = seg.bg_subtract(io.read_channel(p.get("red")), sd["nucleus_px"])
+        g = seg.bg_subtract(io.read_channel(p.get("green")), sd["nucleus_px"])
+        cases.append((seg.segment_classic(r, g, sd["nucleus_px"], 0.5), r, g))
+    rng = np.random.default_rng(3)
+    dense = ndi.label(ndi.gaussian_filter(rng.random((300, 400)), 2) > 0.52)[0].astype(np.uint16)
+    cases.append((dense, rng.normal(100, 30, dense.shape).astype(np.float32), None))
+    for labels, r, g in cases:
+        assert labels.max() > 5
+        a, b = _quantify_scipy(labels, r, g, 6.0), seg.quantify(labels, r, g, 6.0)
+        for k in a:
+            np.testing.assert_allclose(np.asarray(b[k], float), np.asarray(a[k], float), rtol=1e-5, atol=1e-4,
+                                       equal_nan=True, err_msg=k)
+
+
+def test_worker_count_from_memory(monkeypatch):
+    from pipfucci import experiment as E
+
+    def mac(cores, gb):
+        monkeypatch.setattr(E.os, "cpu_count", lambda: cores)
+        monkeypatch.setattr(E.os, "sysconf", lambda k: 4096 if k == "SC_PAGE_SIZE" else int(gb * 2 ** 30 / 4096))
+
+    mac(8, 8)        # M1, 8 GB: was held to 4
+    assert E.worker_count() == 7
+    assert E.worker_count(per_worker_gb=E.worker_gb(2 * E.STD_IMAGE_PX)) == 4   # twice the pixels
+    assert E.worker_count(per_worker_gb=E.worker_gb(method="cellpose")) == 2
+    assert E.worker_count(3) == 3 and E.worker_count(setting=2) == 2
+    mac(10, 16)      # M4 mini, 16 GB
+    assert E.worker_count() == 9
+    mac(4, 3)        # very little memory: one worker
+    assert E.worker_count() == 1
