@@ -72,10 +72,19 @@ back. On the Population page all charts zoom together and clicking a condition i
 or shows it. On box and dot plots, hover a box for median, quartiles and n; click a dot to open
 that cell in Single cells.
 
-**Leaving out blurry images:** on the plate map choose *Exclude wells (blurry)* and click wells,
-or in Segment & gate set *Use in results* to *Not this field* / *Not well B2*. Nothing is
-re-analysed; those wells and fields are left out of every chart, figure and Prism table, and are
-marked `excluded` in the per-cell and per-track tables.
+**Leaving out blurry images:** in Segment & gate, *Use in results* → *Not this image* leaves out
+just the image on screen (that field at that time point; the key **X** does the same while stepping
+through frames), *Not this field* leaves out the field at every time point, *Not well B2* the whole
+well. On the plate map, *Exclude wells (blurry)* does whole wells. Nothing is re-analysed: left-out
+images become gaps (or, if a well has other fields at that time, the count is scaled to the fields
+that remain) in every chart, figure and Prism table, and are marked `excluded` in the per-cell and
+per-track tables.
+
+**Figures** can be zoomed with − / + or a pinch (scroll to move around), and the time axis of
+time-course figures narrowed by dragging across a range. The red-vs-green figure takes the time
+points you type (up to 8; the Population page uses the same ones). *Cell-cycle composition of all
+cells* is the stacked version for every cell in the images at each time point; *Cell-cycle
+composition over time* follows only the founder cells and their daughters.
 
 **Export all graphs & figures** (Figures page or the Export card) writes every figure as PNG (3×)
 and SVG into one dated folder in `PIP-FUCCI results/figures/`: composition, phase durations, phase

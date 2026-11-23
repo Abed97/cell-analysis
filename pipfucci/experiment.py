@@ -684,6 +684,29 @@ class Experiment:
                 out.add(w)
         return out
 
+    def excluded_frames(self) -> dict:
+        """Single images left out: {"B2_1": {12, 13}} (field B2_1 at frames 12 and 13)."""
+        out: dict = {}
+        for x in self.settings.excluded:
+            mv, sep, fr = x.partition("@")
+            if sep and fr.isdigit():
+                out.setdefault(mv, set()).add(int(fr))
+        return out
+
+    def frame_excluded_mask(self, cells) -> np.ndarray:
+        """Rows of `cells` that belong to a single image left out of the results."""
+        exf = self.excluded_frames()
+        m = np.zeros(len(cells), dtype=bool)
+        if not exf or not len(cells):
+            return m
+        wells, fields, frames = cells["well"].values, cells["field"].values, cells["frame"].values
+        for mv, frs in exf.items():
+            w, _, f = mv.rpartition("_")
+            if not f.isdigit():
+                continue
+            m |= (wells == w) & (fields == int(f)) & np.isin(frames, list(frs))
+        return m
+
     def movie_excluded(self, well: str, field) -> bool:
         ex = self.settings.excluded
         return well in ex or f"{well}_{int(field)}" in ex or well in self.excluded_wells()

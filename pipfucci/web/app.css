@@ -219,3 +219,13 @@ table.dur td:last-child { text-align: right; font-family: var(--mono); }
 .leg-btn[aria-pressed="false"] { opacity: 0.4; text-decoration: line-through; }
 .well.excluded { background-image: linear-gradient(45deg, transparent 44%, #FF6B6B 44% 56%, transparent 56%), linear-gradient(-45deg, transparent 44%, #FF6B6B 44% 56%, transparent 56%) !important; }
 .ex-flag { position: absolute; left: 50%; transform: translateX(-50%); top: 12px; padding: 6px 10px; border-radius: 6px; background: rgba(120,20,20,0.85); color: #fff; font-size: 12px; font-weight: 600; pointer-events: none; }
+.x-btn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 10px;
+  background: transparent; color: var(--muted); cursor: pointer; }
+.x-btn:hover { background: #2A3036; color: #fff; }
+.x-btn svg { width: 12px; height: 12px; }
+.seg.mag button { min-width: 34px; padding: 0 8px; color: var(--text2); font-variant-numeric: tabular-nums; }
+.fig-card { max-height: 82vh; overflow: auto; }
+.fig-card.magnified { cursor: grab; }
+.ex-ticks { position: relative; height: 8px; margin: -6px 0 0; }
+.ex-ticks span { position: absolute; top: 0; width: 3px; height: 8px; border-radius: 1px; background: #FF6B6B; transform: translateX(-1px); }
+.ex-list { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }

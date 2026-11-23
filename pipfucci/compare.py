@@ -124,9 +124,11 @@ def figures(exps: list[Experiment]) -> dict:
         comp = {k: [] for k in CAT_NAMES}
         if n:
             P = np.vstack(paths)
+            seen = np.maximum((P != -2).sum(axis=0), 0)  # -2: image left out at that time point
             for i, k in enumerate(CAT_NAMES):
                 code = -1 if k == "Unclassified" else i
-                comp[k] = A._clean(100.0 * (P == code).sum(axis=0) / n)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    comp[k] = A._clean(np.where(seen > 0, 100.0 * (P == code).sum(axis=0) / np.maximum(seen, 1), np.nan))
         out.append({"id": grp["key"], "name": grp["name"], "color": grp["color"], "dashed": grp["dashed"],
                     "hidden": grp["hidden"], "experiments": sorted(set(grp["experiments"])),
                     "n": n, "composition": comp, "durations": dur, "duration_keys": dkeys, "cycle": cycles})
@@ -194,11 +196,14 @@ def colony_dist(exps: list[Experiment], every_h: float | None = None, max_dots: 
                     continue
                 sizes = _sizes(e, key)
                 frames = m["frames"]
+                skip = e.excluded_frames().get(key, set())
                 cols = m.get("colonies") or [None] * len(frames)
                 for ti, t in enumerate(times):
                     if t > hours[-1] + 1e-6:
                         continue
                     f = int(np.argmin(np.abs(hours - t)))
+                    if f in skip:
+                        continue
                     if f in frames:
                         i = frames.index(f)
                         if cols[i] is not None:

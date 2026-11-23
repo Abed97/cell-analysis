@@ -11,6 +11,14 @@ from pathlib import Path
 DEFAULT_COLORS = ["#7AB0FF", "#F59E5B", "#C59BFF", "#5FD4C4", "#F27FB2", "#B8C46A", "#A0A8B2"]
 
 
+def _excluded_order(x: str):
+    """B2 < B2_1 < B2_1@3 < B2_1@12 < B10."""
+    mv, _, fr = x.partition("@")
+    well, _, fld = mv.partition("_")
+    num = "".join(ch for ch in well[1:] if ch.isdigit())
+    return (well[:1], int(num or 0), int(fld) if fld.isdigit() else -1, int(fr) if fr.isdigit() else -1, x)
+
+
 @dataclass
 class Settings:
     interval_min: float = 60.0
@@ -33,7 +41,9 @@ class Settings:
     gate_red: float | None = None
     experiment_name: str = ""
     linked: list = field(default_factory=list)  # other analysed experiment folders shown alongside this one
-    excluded: list = field(default_factory=list)  # wells ("B2") or fields ("B2_1") left out of results (blurry)
+    # left out of results (blurry): a well "B2", a field "B2_1" (every time point) or one image "B2_1@12" (frame 12)
+    excluded: list = field(default_factory=list)
+    scatter_hours: list = field(default_factory=list)  # time points of the red-vs-green plots; empty = automatic
     styles: dict = field(default_factory=dict)  # figure style per condition name: color, dashed, order, hidden
 
     # ---------- derived ----------
@@ -165,8 +175,18 @@ class Settings:
             self.sensitivity = 0.5
         if not isinstance(self.excluded, list):
             self.excluded = []
-        self.excluded = sorted({str(x) for x in self.excluded if isinstance(x, str) and x},
-                               key=lambda x: (x[0], int("".join(ch for ch in x[1:].split("_")[0] if ch.isdigit()) or 0), x))
+        self.excluded = sorted({str(x) for x in self.excluded if isinstance(x, str) and x}, key=_excluded_order)
+        if not isinstance(self.scatter_hours, list):
+            self.scatter_hours = []
+        hs = []
+        for h in self.scatter_hours:
+            try:
+                h = round(float(h), 3)
+            except (TypeError, ValueError):
+                continue
+            if h >= 0 and h not in hs:
+                hs.append(h)
+        self.scatter_hours = sorted(hs)[:8]
         if not isinstance(self.styles, dict):
             self.styles = {}
         if not isinstance(self.linked, list):

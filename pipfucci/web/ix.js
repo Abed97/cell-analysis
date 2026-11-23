@@ -277,3 +277,27 @@ document.addEventListener('wheel', (ev) => {
     ixPan(hit, q, ev.deltaX / (q.x1 - q.x0) * (q.h1 - q.h0));
   }
 }, { passive: false });
+
+// Safari / the app: pinch arrives as gesture events, not Ctrl + wheel
+let ixGesture = null;
+document.addEventListener('gesturestart', (ev) => {
+  if (ev.target.closest && ev.target.closest('.fig-card')) return;  // figures magnify instead
+  const hit = ixFind(ev.target);
+  if (!hit) return;
+  const p = ixPoint(hit.svg, ev);
+  const q = p && ixPanelAt(hit.ch, p, 0);
+  if (!q || q.type !== 'time' || !q.hFull) return;
+  ev.preventDefault();
+  ixGesture = { hit, q, h: ixHourAt(q, p.x), scale: 1 };
+});
+document.addEventListener('gesturechange', (ev) => {
+  if (!ixGesture) return;
+  ev.preventDefault();
+  const g = ixGesture;
+  const f = g.scale / (ev.scale || 1);
+  g.scale = ev.scale || 1;
+  const ch = IX.charts.get(g.hit.ch.id);
+  const q = ch && ch.panels[0] ? ch.panels.find((x) => x.type === 'time') : g.q;
+  ixZoomAround(g.hit, q || g.q, g.h, f);
+});
+document.addEventListener('gestureend', () => { ixGesture = null; });

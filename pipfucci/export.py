@@ -58,6 +58,16 @@ def export_figure_data(exps: list[Experiment], out: Path) -> None:
         (fd / "Experiments included.txt").write_text("\n".join(str(e.folder) for e in exps) + "\n")
 
 
+def _ex_name(exp: Experiment, x: str) -> str:
+    mv, sep, fr = x.partition("@")
+    name = mv.replace("_", " field ")
+    if sep and fr.isdigit():
+        hours = exp.frame_hours()
+        f = int(fr)
+        name += f" at {hours[f]:g} h (frame {f + 1})" if f < len(hours) else f" frame {f + 1}"
+    return name
+
+
 def export_all(exp: Experiment, others: list | None = None) -> Path:
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     out = exp.results_dir / "exports" / stamp
@@ -107,7 +117,7 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
     parents = exp.meta.get("parents", {})
     cells["parent_track"] = cells["track"].map(parents).fillna("")
     ex = exp.excluded_tracks()
-    cells["excluded"] = cells["track"].isin(ex)
+    cells["excluded"] = cells["track"].isin(ex) | exp.frame_excluded_mask(cells)
     cells = cells.rename(columns={"red": "red_mean_bgcorr", "green": "green_mean_bgcorr", "red_med": "red_median_bgcorr",
                                   "green_med": "green_median_bgcorr", "r_n": "red_normalised", "g_n": "green_normalised",
                                   "x_reg": "x_registered", "y_reg": "y_registered", "edge": "at_field_edge"})
@@ -149,7 +159,7 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
         "Statistics should be run on well means (biological replicates), never on individual cells.\n"
         "Settings and versions.json records everything used to make these numbers.\n"
         + (("\nLeft out of the results (blurry images): "
-            + ", ".join(x.replace("_", " field ") for x in exp.settings.excluded)
+            + ", ".join(_ex_name(exp, x) for x in exp.settings.excluded)
             + ".\nTheir cells are still in 'Cells per frame.csv' and 'Tracks.csv', marked excluded = True.\n")
            if exp.settings.excluded else "")
     )

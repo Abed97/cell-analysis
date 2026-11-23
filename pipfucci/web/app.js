@@ -13,7 +13,7 @@ const S = {
   st: null, view: 'experiment', polling: false, activeCond: null,
   v: { well: null, field: null, frame: 0, layers: new Set(['phase', 'red', 'green', 'bgsub', 'masks']), ids: false, playing: false, sel: null,
        scatter: null, gg: null, gr: null, timer: null, cells: null, ver: 0, fps: 6 },
-  fig: { data: null, ctx: null, colStyle: 'lines', every: null, log: true },
+  fig: { data: null, ctx: null, colStyle: 'lines', every: null, log: true, mag: {} },
   pop: { metric: 'count_norm', scond: null, data: null, hidden: new Set(), colStyle: 'lines', dist: null },
   sc: { cond: null, sort: 'division', sel: null, data: null },
 };
@@ -471,10 +471,7 @@ function renderViewer() {
   const shape = mv.shape || [1040, 1408];
   S.v.shape = shape;
   const scalePct = (50 / s.pixel_um) / shape[1] * 100;
-  const exL = s.excluded || [];
-  const isEx = (w, f) => exL.includes(w) || exL.includes(`${w}_${f}`);
-  const opts = movies.map((m) => `<option value="${m.well}|${m.field}" ${m.well === S.v.well && m.field === S.v.field ? 'selected' : ''}>${m.well} · ${esc(condOfWell(m.well))} · field ${m.field}${isEx(m.well, m.field) ? ' · excluded' : ''}</option>`).join('');
-  const exState = exL.includes(S.v.well) ? 'well' : exL.includes(`${S.v.well}_${S.v.field}`) ? 'field' : 'yes';
+  const opts = movies.map((m) => `<option value="${m.well}|${m.field}" ${m.well === S.v.well && m.field === S.v.field ? 'selected' : ''}>${movieLabel(m)}</option>`).join('');
   const layerDefs = [['phase', 'Phase contrast', '#8A929B'], ['green', 'PIP-mVenus', '#3FBF6A'], ['red', 'mCherry-Geminin', '#E5486E'],
     ['bgsub', 'Remove background', '#9CC2FF'], ['masks', 'Nucleus outlines', '#E7E9EC'], ['ids', 'Cell numbers', '#F2C94C'], ['confluence', 'Confluence area', '#5AB8FF']];
   const layers = layerDefs.map(([k, n, c]) => `<label class="chip" title="${k === 'bgsub' ? 'Show red and green with the autofluorescent background subtracted, as the analysis sees them' : k === 'confluence' ? 'Area counted as covered by cells (from phase contrast, all cells whatever their colour)' : ''}"><input type="checkbox" data-layer="${k}" ${(k === 'ids' ? S.v.ids : S.v.layers.has(k)) ? 'checked' : ''}><span class="dot" style="background:${c};border-radius:3px"></span>${n}</label>`).join('');
@@ -485,15 +482,15 @@ function renderViewer() {
       <section class="card tight" style="flex:3 1 560px" aria-label="Image viewer">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
           <div class="legend" role="group" aria-label="Layers">${layers}</div>
-          <div style="display:flex;align-items:center;gap:8px"><span class="small muted">Use in results</span>
-            <div class="seg" role="group" aria-label="Use this field in results" title="Leave out blurry fields or wells. Nothing is re-analysed; they are just left out of the results, figures and exports.">
-              <button type="button" data-useres="yes" aria-pressed="${exState === 'yes'}">Yes</button><button type="button" data-useres="field" aria-pressed="${exState === 'field'}">Not this field</button><button type="button" data-useres="well" aria-pressed="${exState === 'well'}">Not well ${esc(S.v.well)}</button></div></div></div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="small muted">Use in results</span>
+            <div class="seg" role="group" aria-label="Use this image in results" title="Leave out blurry images. Nothing is re-analysed; they are just left out of the results, figures and exports.">
+              <button type="button" data-useres="yes">Yes</button><button type="button" data-useres="image" title="Only this image: this field at this time point (key X)">Not this image</button><button type="button" data-useres="field" title="This field at every time point">Not this field</button><button type="button" data-useres="well" title="Every field of the well, at every time point">Not well ${esc(S.v.well)}</button></div></div></div>
         <div class="viewer-wrap" id="vwrap" style="aspect-ratio:${shape[1]} / ${shape[0]}">
           <img id="frame-img" alt="Field of view with segmented nuclei">
           <svg class="ids-layer" id="ids" viewBox="0 0 ${shape[1]} ${shape[0]}" preserveAspectRatio="none" aria-label="Cell numbers"></svg>
           <div class="ov" style="left:12px;top:12px;pointer-events:none" id="ov-time">t = 0 h</div>
           <div class="ov" style="right:12px;top:12px;pointer-events:none">${S.v.well} · field ${S.v.field}</div>
-          ${exState !== 'yes' ? `<div class="ex-flag">${exState === 'well' ? `Well ${S.v.well}` : 'This field'} is left out of all results</div>` : ''}
+          <div class="ex-flag" id="ex-flag" hidden></div>
           <div class="scale" style="width:${scalePct}%;pointer-events:none"><div></div><span>50 µm</span></div>
         </div>
         <div class="frame-nav" role="group" aria-label="Frame">
@@ -508,12 +505,14 @@ function renderViewer() {
           <select class="input" id="fps" aria-label="Playback speed" style="height:40px;margin-left:auto">${[2, 4, 6, 10].map((v) => `<option value="${v}" ${S.v.fps === v ? 'selected' : ''}>${v} frames/s</option>`).join('')}</select>
         </div>
         <div class="scrub">
-          <input type="range" id="scrub" min="0" max="${nF - 1}" step="1" value="${S.v.frame}" aria-label="Time">
+          <div style="flex:1 1 240px;min-width:0;display:flex;flex-direction:column;gap:4px"><input type="range" id="scrub" min="0" max="${nF - 1}" step="1" value="${S.v.frame}" aria-label="Time" style="width:100%;flex:none">
+            <div class="ex-ticks" id="ex-ticks" aria-hidden="true"></div></div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;font-family:var(--mono);font-size:12px;color:var(--text2);min-width:120px">
             <span style="font-size:14px;color:var(--text)" id="t-label"></span><span id="f-label"></span></div>
         </div>
+        <div class="ex-list" id="ex-list"></div>
         <div id="sel-info"></div>
-        <p class="small muted"><span class="kbd">←</span> <span class="kbd">→</span> one frame · <span class="kbd">Shift</span> + arrow five frames · <span class="kbd">Space</span> play or pause · click a cell to select it and follow it through the movie.</p>
+        <p class="small muted"><span class="kbd">←</span> <span class="kbd">→</span> one frame · <span class="kbd">Shift</span> + arrow five frames · <span class="kbd">Space</span> play or pause · <span class="kbd">X</span> leave this image out (or bring it back) · click a cell to select it and follow it through the movie.</p>
       </section>
       <div style="flex:2 1 340px;min-width:0;display:flex;flex-direction:column;gap:22px">
         <section class="card tight" aria-labelledby="gate-h">
@@ -547,18 +546,7 @@ function renderViewer() {
           <button class="btn primary" id="to-pop">Population results ${ICON.arrow}</button></div>
       </div></div>`;
 
-  $$('[data-useres]').forEach((b) => b.onclick = async () => {
-    const w = S.v.well, f = `${S.v.well}_${S.v.field}`;
-    let ex = (s.excluded || []).filter((x) => x !== w && x !== f);
-    if (b.dataset.useres === 'well') ex = ex.filter((x) => !x.startsWith(w + '_')).concat([w]);
-    if (b.dataset.useres === 'field') ex.push(f);
-    try {
-      const r = await api('settings', { excluded: ex });
-      S.st = r.state; markSaved(); S.v.ver++;
-      toast(b.dataset.useres === 'yes' ? `${w} field ${S.v.field} is used in the results again.` : `${b.dataset.useres === 'well' ? 'Well ' + w : w + ' field ' + S.v.field} is left out of all results.`);
-      renderViewer();
-    } catch (err) { fail(err); }
-  });
+  $$('[data-useres]').forEach((b) => b.onclick = () => setUseRes(b.dataset.useres));
   $('#movie').onchange = (ev) => { const [w, f] = ev.target.value.split('|'); S.v.well = w; S.v.field = parseInt(f, 10); S.v.sel = null; stopPlay(); renderViewer(); };
   $$('input[data-layer]').forEach((c) => c.onchange = () => {
     const k = c.dataset.layer;
@@ -597,6 +585,72 @@ function renderViewer() {
   setupGates();
   loadFrame();
   loadScatter();
+}
+
+// ---------------------------------------------------------------- leaving out blurry images
+function movieLabel(m) {
+  const ex = S.st.experiment.settings.excluded || [];
+  const mv = `${m.well}_${m.field}`;
+  const n = ex.filter((x) => x.startsWith(mv + '@')).length;
+  const out = ex.includes(m.well) || ex.includes(mv) || (S.st.experiment.excluded_wells || []).includes(m.well);
+  return `${m.well} · ${esc(condOfWell(m.well))} · field ${m.field}${out ? ' · left out' : n ? ` · ${n} image${n === 1 ? '' : 's'} left out` : ''}`;
+}
+
+function useResState() {
+  const ex = S.st.experiment.settings.excluded || [];
+  const mv = `${S.v.well}_${S.v.field}`;
+  if (ex.includes(S.v.well)) return 'well';
+  if (ex.includes(mv) || (S.st.experiment.excluded_wells || []).includes(S.v.well)) return 'field';
+  if (ex.includes(`${mv}@${S.v.frame}`)) return 'image';
+  return 'yes';
+}
+
+function updateUseRes() {
+  if (!$('#ex-flag')) return;
+  const st = useResState();
+  $$('[data-useres]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.useres === st));
+  const fl = $('#ex-flag');
+  fl.hidden = st === 'yes';
+  fl.textContent = st === 'well' ? `Well ${S.v.well} is left out of all results` : st === 'field' ? 'This field is left out of all results' : 'This image is left out of all results';
+  const e = S.st.experiment, ex = e.settings.excluded || [], mv = `${S.v.well}_${S.v.field}`, nF = e.hours.length;
+  const frames = ex.filter((x) => x.startsWith(mv + '@')).map((x) => +x.split('@')[1]).sort((a, b) => a - b);
+  $('#ex-ticks').innerHTML = frames.map((f) => `<span style="left:calc(${nF > 1 ? f / (nF - 1) * 100 : 0}% + ${8 - 16 * (nF > 1 ? f / (nF - 1) : 0)}px)" title="${num(e.hours[f])} h left out"></span>`).join('');
+  $('#ex-list').innerHTML = frames.length ? `<span class="muted">Left out in this field:</span>${frames.map((f) => `<span class="chip" style="gap:4px"><button type="button" class="link" data-exgo="${f}" title="Go to this image">${num(e.hours[f])} h</button><button type="button" class="x-btn" data-exback="${f}" aria-label="Bring back the image at ${num(e.hours[f])} h">${ICON.x}</button></span>`).join('')}${frames.length > 1 ? '<button type="button" class="btn sm ghost" id="ex-all-back">Bring all back</button>' : ''}` : '';
+  $$('[data-exgo]').forEach((b) => b.onclick = () => goFrame(+b.dataset.exgo));
+  $$('[data-exback]').forEach((b) => b.onclick = () => saveExcluded(ex.filter((x) => x !== `${mv}@${b.dataset.exback}`)));
+  const ab = $('#ex-all-back'); if (ab) ab.onclick = () => saveExcluded(ex.filter((x) => !x.startsWith(mv + '@')));
+  const opt = $('#movie') && $('#movie').selectedOptions[0];
+  const m = e.movies.find((x) => x.well === S.v.well && x.field === S.v.field);
+  if (opt && m) opt.textContent = movieLabel(m).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+}
+
+async function saveExcluded(ex, message) {
+  try {
+    const r = await api('settings', { excluded: ex });
+    S.st = r.state; markSaved(); S.v.ver++;
+    if (message) toast(message);
+    updateUseRes();
+    loadFrame();
+  } catch (err) { fail(err); }
+}
+
+function setUseRes(what) {
+  const ex0 = S.st.experiment.settings.excluded || [];
+  const w = S.v.well, mv = `${w}_${S.v.field}`, img = `${mv}@${S.v.frame}`;
+  const h = num(S.st.experiment.hours[S.v.frame]);
+  let ex = ex0.filter((x) => x !== w && x !== mv);
+  let msg;
+  if (what === 'yes') { ex = ex.filter((x) => x !== img); msg = `${w} field ${S.v.field} at ${h} h is used in the results.`; }
+  if (what === 'image') { if (!ex.includes(img)) ex.push(img); msg = `${w} field ${S.v.field} at ${h} h is left out. The other time points are still used.`; }
+  if (what === 'field') { ex = ex.filter((x) => !x.startsWith(mv + '@')).concat([mv]); msg = `${w} field ${S.v.field} is left out at every time point.`; }
+  if (what === 'well') { ex = ex.filter((x) => !x.startsWith(w + '_')).concat([w]); msg = `Well ${w} is left out of all results.`; }
+  saveExcluded(ex, msg);
+}
+
+function toggleImage() {
+  const st = useResState();
+  if (st === 'field' || st === 'well') return toast('This whole field is left out; use “Yes” to bring it back first.');
+  setUseRes(st === 'image' ? 'yes' : 'image');
 }
 
 function togglePlay() {
@@ -656,6 +710,7 @@ function loadFrame() {
   $('#f-label').textContent = `frame ${f + 1} of ${e.hours.length}`;
   prefetch(f + 1);
   if (S.v.playing) prefetch(f + 2); else prefetch(f - 1);
+  updateUseRes();
   if (S.v.ids || S.v.sel) loadCells(); else { S.v.cells = null; drawIds(); }
   if (!S.v.playing) {
     api(`stats?well=${S.v.well}&field=${S.v.field}&frame=${f}`).then((st) => {
@@ -940,7 +995,7 @@ async function renderPopulation() {
   const linked = (S.st.experiment.linked || []).filter((l) => l.ok);
   const metrics = [['count_norm', 'Cell number (× t0)'], ['total', 'Nuclei'], ['confluence', 'Confluence']];
   const nF = d.hours.length;
-  const tps = [0, Math.round((nF - 1) / 3), Math.round(2 * (nF - 1) / 3), nF - 1];
+  const tps = scatterTps();  // chosen on the Figures page, or four evenly spaced
   const box = S.pop.colStyle === 'box';
   main.innerHTML = header(3, 'Population', `<div class="legend" role="group" aria-label="Conditions (click to hide or show)">${condLegend(d.conditions)}<span class="muted">Mean ± SEM across wells</span></div>`)
     + excludedNote()
@@ -961,7 +1016,7 @@ async function renderPopulation() {
        <section class="card" aria-labelledby="cnt-h"><div class="card-head"><div><h2 id="cnt-h">Growth</h2><p id="cnt-sub"></p></div>
          <div class="seg" role="group" aria-label="Metric">${metrics.map(([k, n]) => `<button type="button" data-metric="${k}" aria-pressed="${S.pop.metric === k}">${n}</button>`).join('')}</div></div>
          <div id="cnt-chart"></div></section>
-       <section class="card" aria-labelledby="sc-h"><div class="card-head"><div><h2 id="sc-h">Red vs green at selected timepoints</h2><p>FUCCI-style plots with the gates from step 2.</p></div>
+       <section class="card" aria-labelledby="sc-h"><div class="card-head"><div><h2 id="sc-h">Red vs green at selected timepoints</h2><p>FUCCI-style plots with the gates from step 2. Choose the time points on the Figures page.</p></div>
          <div class="seg" role="group" aria-label="Condition">${scConds.map((c) => `<button type="button" data-scond="${c.id}" aria-pressed="${S.pop.scond === c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.name)}</button>`).join('')}</div></div>
          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">${tps.map((f, i) => `<figure style="margin:0;padding:10px;border-radius:8px;background:var(--well);display:flex;flex-direction:column;gap:6px">
            <figcaption style="display:flex;justify-content:space-between;font-size:13px"><strong>${num(d.hours[f])} h</strong><span class="mono muted" id="scn-${i}"></span></figcaption>
@@ -1388,6 +1443,9 @@ document.addEventListener('keydown', (ev) => {
   } else if (ev.key === ' ' && document.activeElement.tagName !== 'BUTTON') {
     ev.preventDefault();
     togglePlay();
+  } else if (ev.key === 'x' || ev.key === 'X') {
+    ev.preventDefault();
+    toggleImage();
   } else if (ev.key === 'Home') goFrame(0);
   else if (ev.key === 'End') goFrame(S.st.experiment.hours.length - 1);
 });

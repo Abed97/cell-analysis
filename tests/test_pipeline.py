@@ -268,3 +268,35 @@ def test_colony_box_plot_data(exp):
         assert st and st["n"] >= 1 and st["q1"] <= st["med"] <= st["q3"]
         assert c["counts"][0]["values"] and c["counts"][0]["labels"][0].endswith("field 1")
     assert exp_list
+
+
+def test_leaving_out_single_images(exp):
+    from pipfucci import compare
+
+    m = next(iter(exp.meta["movies"].values()))
+    mv = f"{m['well']}_{m['field']}"
+    ws0 = analysis.well_series(exp)[m["well"]]
+    exp.update_settings({"excluded": [f"{mv}@10", f"{mv}@11"]})
+    try:
+        assert exp.excluded_frames() == {mv: {10, 11}}
+        assert exp.excluded_wells() == set() and not exp.tracks_in_excluded()  # nothing else is left out
+        ws = analysis.well_series(exp)[m["well"]]
+        assert np.isnan(ws["total"][10]) and np.isnan(ws["frac"][11]).all() and np.isnan(ws["confluence"][10])
+        assert ws["total"][12] == ws0["total"][12] and ws["total"][9] == ws0["total"][9]  # other time points kept
+        act = analysis._active(exp)
+        assert not ((act["well"] == m["well"]) & (act["frame"].isin([10, 11]))).any()
+        fig = compare.figures([exp])
+        slow = next(c for c in fig["conditions"] if c["name"] == "Slow cycling")
+        assert slow["composition"]["G1"][10] is None and slow["composition"]["G1"][12] is not None
+        cnt = compare.colony_dist([exp], every_h=0.5)
+        c0 = next(c for c in cnt["conditions"] if c["name"] == "Slow cycling")
+        assert c0["counts"][10]["stats"] is None and c0["counts"][12]["stats"] is not None
+    finally:
+        exp.update_settings({"excluded": []})
+
+
+def test_scatter_time_points_setting(exp):
+    exp.update_settings({"scatter_hours": [12, "3", -1, 12, "x", 0, 1, 2, 4, 5, 6, 7, 8]})
+    assert exp.settings.scatter_hours == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    exp.update_settings({"scatter_hours": []})
+    assert exp.settings.scatter_hours == []

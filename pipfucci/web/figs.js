@@ -111,6 +111,61 @@ function figComposition(d, conds, zoom = null) {
   return { svg: s + '</svg>', panels };
 }
 
+// ---------------------------------------------------------------- A2: composition of all cells
+// Every cell in the images at each time point (not only founders), as the mean of the wells.
+function figPopComposition(pop, conds, zoom = null) {
+  const by = Object.fromEntries(pop.conditions.map((c) => [c.id, c]));
+  const cs = conds.filter((c) => by[c.id]);
+  const cats = ['G1', 'S', 'G2M', 'Colourless'];
+  const pw = 230, ph = 180, gap = 34, l = 58, t = 34, b = 48, legW = 120;
+  const W = l + cs.length * pw + (cs.length - 1) * gap + 28 + legW, H = t + ph + b;
+  const hours = pop.hours, hFull = hours[hours.length - 1] || 1;
+  let s = svgOpen(W, H, 'Cell-cycle composition of all cells over time');
+  const panels = [];
+  cs.forEach((c, i) => {
+    const p = by[c.id];
+    const x0 = l + i * (pw + gap);
+    const f = pubTime(x0, t, pw, ph, hFull, zoom, [0, 25, 50, 75, 100], 100);
+    // the wells' mean fractions, rescaled to add up to exactly 100% at every time point
+    const vals = {};
+    cats.forEach((k) => { vals[k] = []; });
+    hours.forEach((_, j) => {
+      const raw = cats.map((k) => (p[k] && p[k].mean[j] != null ? p[k].mean[j] : null));
+      const sum = raw.reduce((a, v) => a + (v || 0), 0);
+      cats.forEach((k, ki) => { vals[k].push(raw[ki] == null || sum <= 0 ? null : raw[ki] / sum * 100); });
+    });
+    s += f.s + `<g clip-path="url(#${f.cid})">`;
+    const cum = hours.map(() => 0);
+    cats.forEach((k) => {
+      const up = [], lo = [];
+      let run = [];
+      const flush = () => {
+        if (run.length) s += `<path d="M${run.map((j) => `${r1(f.sx(hours[j]))} ${r1(f.sy(cum[j] + vals[k][j]))}`).join('L')}L${run.slice().reverse().map((j) => `${r1(f.sx(hours[j]))} ${r1(f.sy(cum[j]))}`).join('L')}Z" fill="${PUB[k]}" stroke="none"/>`;
+        run = [];
+      };
+      hours.forEach((_, j) => { if (vals[k][j] == null) flush(); else run.push(j); });
+      flush();
+      hours.forEach((_, j) => { cum[j] += vals[k][j] || 0; });
+      up.length = lo.length = 0;
+    });
+    s += '</g>';
+    s += `<path d="M${x0} ${t}V${t + ph}H${x0 + pw}" stroke="#000" fill="none"/>`;
+    const nw = p.wells.length;
+    s += `<text x="${x0 + pw / 2}" y="${t - 12}" font-size="13" font-weight="700" text-anchor="middle" fill="${esc(c.color)}">${esc(shortName(c.name, 22))} (${nw} well${nw === 1 ? '' : 's'})</text>`;
+    s += `<text x="${x0 + pw / 2}" y="${H - 10}" font-size="12" text-anchor="middle" fill="#000">Time (h)</text>`;
+    panels.push({ type: 'time', stack: true, x0, x1: x0 + pw, y0: t, y1: t + ph, h0: f.h0, h1: f.h1, hFull: [0, hFull], title: c.name, fmt: pct, cross: '#000',
+      series: cats.map((k) => ({ name: CAT_LABEL[k], color: PUB[k], hours, values: vals[k] }))
+        .concat([{ name: 'Nuclei per well', color: '#FFFFFF', hours, values: p.total ? p.total.mean : [], fmt: (v) => ixNum(v, 0) }]) });
+  });
+  s += `<text x="16" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 16 ${t + ph / 2})">% of cells</text>`;
+  const lx = W - legW + 4;
+  [...cats].reverse().forEach((k, j) => {
+    const y = t + 8 + j * 20;
+    s += `<rect x="${lx}" y="${y}" width="14" height="12" fill="${PUB[k]}"/><text x="${lx + 20}" y="${y + 10}" font-size="11" fill="#000">${CAT_LABEL[k]}</text>`;
+  });
+  return { svg: s + '</svg>', panels };
+}
+
 // ---------------------------------------------------------------- B: durations (box + dots)
 function figDurations(d, conds) {
   const phases = [['G1', 'G1 duration'], ['S', 'S duration'], ['G2M', 'G2/M duration']];
@@ -363,6 +418,7 @@ function figScatter(sc, conds, tps, hours, gates) {
         s += `<path d="M${r1(sx(gates.g))} ${y0}V${y0 + cell}M${x0} ${r1(sy(gates.r))}H${x0 + cell}" stroke="#000" stroke-dasharray="4 3"/>`;
         const cnt = d.counts, tot = Math.max(1, d.n);
         s += `<text x="${x0 + cell - 4}" y="${y0 + 12}" font-size="9" text-anchor="end" fill="#000">n=${d.n}</text>`;
+        if (!d.n) s += `<text x="${x0 + cell / 2}" y="${y0 + cell / 2}" font-size="10" text-anchor="middle" fill="#888">no cells (image left out?)</text>`;
         panels.push({ type: 'box', x0, x1: x0 + cell, y0, y1: y0 + cell, dots: [], boxes: [{ cx: x0 + cell / 2, half: cell / 2, name: c.name, color: c.color, stats: null,
           info: `<div class="h"><span class="sw" style="background:${c.color}"></span>${ixEsc(c.name)} · ${ixNum(hours[f], 1)} h</div>` + ['G1', 'S', 'G2/M', 'Dim'].map((nm, k) => `<div class="r"><span class="n">${nm}</span><span class="v">${Math.round(cnt[k] / tot * 100)}%</span></div>`).join('') + `<div class="r"><span class="n">Nuclei</span><span class="v">${d.n}</span></div>` }] });
       }
@@ -395,8 +451,8 @@ function stylesCard(d) {
 }
 
 // ---------------------------------------------------------------- the Figures page
-const FIG_HINT_TIME = 'Hover for values · drag across a time range to zoom (pinch also works, swipe sideways to pan) · double-click or “Reset zoom” to go back. Saving keeps the zoom you see.';
-const FIG_HINT_BOX = 'Hover a box for median, quartiles and n, or a dot for its value.';
+const FIG_HINT_TIME = 'Hover for values. Zoom with − / + (or pinch), or drag across a time range to show only that part of the time axis; double-click or “Reset zoom” to go back. Saving keeps the time range you see.';
+const FIG_HINT_BOX = 'Hover a box for median, quartiles and n, or a dot for its value. Zoom with − / + (or pinch).';
 
 function condKey(n) { return String(n).toLowerCase().split(/\s+/).filter(Boolean).join(' '); }
 
@@ -420,6 +476,9 @@ function figDefs(ctx) {
     { id: 'fig-a', title: 'Cell-cycle composition over time', time: true, ok: shown.length,
       sub: 'Every cell present in the first frame (a founder) is followed through its divisions, along one daughter each time. Colourless = neither reporter on; Unclassified = no longer tracked (lost or left the field).',
       build: (z) => figComposition(d, shown, z) },
+    { id: 'fig-a2', title: 'Cell-cycle composition of all cells over time', time: true, ok: shownAll.length,
+      sub: 'Every cell in the images at each time point, not only the founders and their daughters: the share in each phase per well, averaged over the wells of a condition. Images left out (blurry) are skipped.',
+      build: (z) => figPopComposition(pop, shownAll, z) },
     { id: 'fig-b', title: 'Time spent in each phase', ok: shown.length, clickable: true,
       sub: 'Hours in each phase, for phases seen from start to end inside the movie. One dot per cell per phase; boxes show the median and quartiles, whiskers 1.5 × IQR. Every value is ± one frame interval.',
       build: () => figDurations(d, shown) },
@@ -440,6 +499,7 @@ function figDefs(ctx) {
         { name: 'Colonies over time (box plots)', build: () => figColonyBoxes(dist, distConds, S.fig.log) },
       ] },
     { id: 'fig-g', title: 'Red versus green at selected time points', ok: true, scatter: true,
+      hint: 'Type a time in hours and press Add (up to 8; each snaps to the nearest image); × removes one, Automatic goes back to four evenly spaced. The Population page uses the same time points. Hover a plot for the share in each gate. Zoom with − / + (or pinch).',
       sub: 'FUCCI-style plots for this experiment, coloured by gate (green G1, red S, yellow G2/M, grey dim), with the gates from step 2. Up to 600 cells per plot.' },
   ];
 }
@@ -457,9 +517,9 @@ function figSection(def) {
     : '<p style="color:#444;padding:20px">No conditions to show. Assign wells on the plate map (step 1) or tick “Show” above.</p>';
   const body = def.scatter ? '<p style="color:#444;padding:20px">Loading…</p>' : def.ok ? ixChart(def.build, { group: def.id }) : empty;
   return `<section class="card" aria-labelledby="${def.id}-h"><div class="card-head"><div><h2 id="${def.id}-h">${def.title}</h2><p>${def.sub}</p></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">${def.colonies ? colonyControls() : ''}<button class="btn" data-save="${def.id}" data-name="${esc(def.title)}">${ICON.down} Save PNG + SVG</button></div></div>
-    <div class="fig-card" id="${def.id}">${body}</div>
-    <p class="small muted">${def.time ? FIG_HINT_TIME : def.clickable ? FIG_HINT_BOX + ' Click a dot to open that cell.' : FIG_HINT_BOX}</p></section>`;
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">${def.colonies ? colonyControls() : ''}${def.scatter ? scatterControls() : ''}${magControls(def.id)}<button class="btn" data-save="${def.id}" data-name="${esc(def.title)}">${ICON.down} Save PNG + SVG</button></div></div>
+    <div class="fig-card" id="${def.id}" data-mag="${S.fig.mag[def.id] || 0}">${body}</div>
+    <p class="small muted">${def.hint || (def.time ? FIG_HINT_TIME : def.clickable ? FIG_HINT_BOX + ' Click a dot to open that cell.' : FIG_HINT_BOX)}</p></section>`;
 }
 
 async function scatterData(tps) {
@@ -476,9 +536,22 @@ function scatterConds(d) {
   return ownConditions().map((c) => { const st = style[condKey(c.name)]; return st && st.hidden ? null : { id: c.id, name: c.name, color: st ? st.color : c.color }; }).filter(Boolean);
 }
 
+// Frames of the red-vs-green plots: the hours chosen on the Figures page (nearest frame), or four
+// evenly spaced ones.
 function scatterTps() {
-  const nF = S.st.experiment.hours.length;
-  return [...new Set([0, Math.round((nF - 1) / 3), Math.round(2 * (nF - 1) / 3), nF - 1])];
+  const hours = S.st.experiment.hours, nF = hours.length;
+  const want = S.st.experiment.settings.scatter_hours || [];
+  if (!want.length) return [...new Set([0, Math.round((nF - 1) / 3), Math.round(2 * (nF - 1) / 3), nF - 1])];
+  const near = (h) => hours.reduce((bi, x, i) => (Math.abs(x - h) < Math.abs(hours[bi] - h) ? i : bi), 0);
+  return [...new Set(want.map(near))].sort((a, b) => a - b);
+}
+
+function scatterControls() {
+  const e = S.st.experiment, hours = e.hours, want = e.settings.scatter_hours || [];
+  const chips = scatterTps().map((f) => `<span class="chip" style="gap:6px">${num(hours[f])} h${want.length ? `<button type="button" class="x-btn" data-sc-del="${hours[f]}" aria-label="Remove ${num(hours[f])} h">${ICON.x}</button>` : ''}</span>`).join('');
+  return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span class="small muted">Time points${want.length ? '' : ' (automatic)'}</span>${chips}
+    <span class="unit-input" style="width:118px"><input type="number" id="sc-add" min="0" max="${hours[hours.length - 1]}" step="any" placeholder="add" aria-label="Add a time point in hours"><span>h</span></span>
+    <button type="button" class="btn sm" id="sc-add-btn">Add</button>${want.length ? '<button type="button" class="btn sm ghost" id="sc-auto">Automatic</button>' : ''}</div>`;
 }
 
 async function buildScatterFigure(d) {
@@ -489,10 +562,17 @@ async function buildScatterFigure(d) {
   return () => figScatter(sc, scatterConds(d), tps, S.st.experiment.hours, gates);
 }
 
+function exName(x) {
+  const [mv, fr] = x.split('@');
+  let n = mv.replace('_', ' field ');
+  if (fr != null) { const h = S.st.experiment.hours[+fr]; n += h != null ? ` at ${ixNum(h, 2)} h` : ` frame ${+fr + 1}`; }
+  return n;
+}
+
 function excludedNote() {
   const ex = (S.st.experiment.settings.excluded || []);
   if (!ex.length) return '';
-  const nice = ex.map((x) => (x.includes('_') ? x.replace('_', ' field ') : x));
+  const nice = ex.map(exName);
   return `<div class="info">${ICON.info}<span>Left out of all results (blurry images): <strong>${esc(nice.join(', '))}</strong>. Change this on the plate map (step 1) or in Segment &amp; gate.</span></div>`;
 }
 
@@ -515,7 +595,7 @@ async function renderFigures(force = false) {
   if (g) {
     const build = await buildScatterFigure(d);
     const el = $('#fig-g');
-    if (el && S.view === 'figures') el.innerHTML = scatterConds(d).length ? ixChart(build, { group: 'fig-g' }) : '<p style="color:#444;padding:20px">No conditions of this experiment to show.</p>';
+    if (el && S.view === 'figures') { el.innerHTML = scatterConds(d).length ? ixChart(build, { group: 'fig-g' }) : '<p style="color:#444;padding:20px">No conditions of this experiment to show.</p>'; applyMag('fig-g'); }
   }
 }
 
@@ -525,6 +605,7 @@ function rerenderFig(id) {
   if (!def || !el) return;
   el.closest('section').outerHTML = figSection(def);
   bindFigures(S.fig.data);
+  if (def.scatter) buildScatterFigure(S.fig.data).then((build) => { const g = $('#fig-g'); if (g) { g.innerHTML = ixChart(build, { group: 'fig-g' }); applyMag('fig-g'); } });
 }
 
 function bindFigures(d) {
@@ -570,6 +651,33 @@ function bindFigures(d) {
   };
   const cl = $('#col-log'); if (cl) cl.onchange = () => { S.fig.log = cl.checked; rerenderFig('fig-d'); };
   const sa = $('#fig-saveall'); if (sa) sa.onclick = () => exportAll(sa);
+  const setHours = async (hs) => {
+    try { const r = await api('settings', { scatter_hours: hs }); S.st = r.state; markSaved(); } catch (err) { return fail(err); }
+    rerenderFig('fig-g');
+  };
+  const addH = () => {
+    const v = parseFloat($('#sc-add').value);
+    const hours = S.st.experiment.hours;
+    if (!isFinite(v) || v < 0 || v > hours[hours.length - 1] + 1e-6) return toast(`Enter a time between 0 and ${num(hours[hours.length - 1])} h.`, { bad: true });
+    const cur = (S.st.experiment.settings.scatter_hours || []).length ? S.st.experiment.settings.scatter_hours : scatterTps().map((f) => hours[f]);
+    if (cur.length >= 8) return toast('Up to 8 time points.', { bad: true });
+    setHours([...cur, v]);
+  };
+  const sab = $('#sc-add-btn'); if (sab) sab.onclick = addH;
+  const sai = $('#sc-add'); if (sai) sai.onkeydown = (ev) => { if (ev.key === 'Enter') addH(); };
+  const sau = $('#sc-auto'); if (sau) sau.onclick = () => setHours([]);
+  $$('[data-sc-del]').forEach((b) => b.onclick = () => {
+    const h = parseFloat(b.dataset.scDel);
+    const hours = S.st.experiment.hours;
+    const left = (S.st.experiment.settings.scatter_hours || []).filter((x) => Math.abs(hours[scatterNear(x)] - h) > 1e-6);
+    setHours(left);
+  });
+  $$('.fig-card').forEach((c) => applyMag(c.id));
+}
+
+function scatterNear(h) {
+  const hours = S.st.experiment.hours;
+  return hours.reduce((bi, x, i) => (Math.abs(x - h) < Math.abs(hours[bi] - h) ? i : bi), 0);
 }
 
 function svgToPng(svgText, scale = 3) {
@@ -636,3 +744,96 @@ async function exportAll(btn) {
   } catch (e) { fail(e); }
   if (btn) { btn.disabled = false; btn.innerHTML = label; }
 }
+
+// ---------------------------------------------------------------- magnifying a figure
+// 0 = fit the card width; otherwise a zoom factor on the figure's natural size.
+const MAG_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4];
+
+function magControls(id) {
+  const m = S.fig.mag[id] || 0;
+  return `<div class="seg mag" role="group" aria-label="Zoom the figure"><button type="button" data-mag="${id}" data-step="-1" aria-label="Zoom out">−</button>
+    <button type="button" data-mag="${id}" data-step="0" aria-label="Fit to width" title="Fit to width">${m ? Math.round(m * 100) + '%' : 'Fit'}</button>
+    <button type="button" data-mag="${id}" data-step="1" aria-label="Zoom in">+</button></div>`;
+}
+
+function natWidth(svg) { return +(svg.getAttribute('width') || svg.viewBox.baseVal.width || 800); }
+
+function fitScale(card, svg) { return Math.min(1, (card.clientWidth - 28) / natWidth(svg)); }
+
+function applyMag(id, keepAt = null) {
+  const card = document.getElementById(id);
+  const svg = card && card.querySelector('svg');
+  if (!svg) return;
+  const m = S.fig.mag[id] || 0;
+  const w = natWidth(svg);
+  const before = keepAt ? { sx: card.scrollLeft, sy: card.scrollTop, w: svg.getBoundingClientRect().width } : null;
+  svg.style.width = m ? Math.round(w * m) + 'px' : '100%';
+  svg.style.maxWidth = m ? 'none' : w + 'px';
+  svg.style.height = 'auto';
+  card.dataset.mag = m;
+  card.classList.toggle('magnified', !!m && w * m > card.clientWidth - 28);
+  if (before && keepAt) {  // keep the point under the pointer in place
+    const k = svg.getBoundingClientRect().width / (before.w || 1);
+    card.scrollLeft = (before.sx + keepAt.x) * k - keepAt.x;
+    card.scrollTop = (before.sy + keepAt.y) * k - keepAt.y;
+  }
+  const lab = document.querySelector(`[data-mag="${id}"][data-step="0"]`);
+  if (lab) lab.textContent = m ? Math.round(m * 100) + '%' : 'Fit';
+}
+
+function stepMag(id, dir) {
+  const card = document.getElementById(id);
+  const svg = card && card.querySelector('svg');
+  if (!svg) return;
+  const cur = S.fig.mag[id] || fitScale(card, svg);
+  let next;
+  if (dir === 0) next = 0;
+  else if (dir > 0) next = MAG_STEPS.find((x) => x > cur + 1e-3) || MAG_STEPS[MAG_STEPS.length - 1];
+  else next = [...MAG_STEPS].reverse().find((x) => x < cur - 1e-3) || MAG_STEPS[0];
+  if (next && Math.abs(next - fitScale(card, svg)) < 1e-3) next = 0;
+  S.fig.mag[id] = next;
+  applyMag(id);
+}
+
+function magBy(id, factor, at) {
+  const card = document.getElementById(id);
+  const svg = card && card.querySelector('svg');
+  if (!svg) return;
+  const cur = S.fig.mag[id] || fitScale(card, svg);
+  S.fig.mag[id] = Math.min(6, Math.max(0.25, cur * factor));
+  applyMag(id, at);
+}
+
+document.addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-mag][data-step]');
+  if (b) stepMag(b.dataset.mag, +b.dataset.step);
+});
+
+// pinch on a figure magnifies it: Ctrl + wheel (Chrome) or Safari's gesture events (the app)
+document.addEventListener('wheel', (ev) => {
+  if (!ev.ctrlKey) return;
+  const card = ev.target.closest && ev.target.closest('.fig-card');
+  if (!card) return;
+  ev.preventDefault();
+  ev.stopImmediatePropagation();
+  const r = card.getBoundingClientRect();
+  magBy(card.id, Math.exp(-ev.deltaY * 0.01), { x: ev.clientX - r.left, y: ev.clientY - r.top });
+}, { passive: false, capture: true });
+
+let gestureMag = null;
+document.addEventListener('gesturestart', (ev) => {
+  const card = ev.target.closest && ev.target.closest('.fig-card');
+  if (!card) return;
+  ev.preventDefault();
+  const svg = card.querySelector('svg');
+  gestureMag = { id: card.id, start: S.fig.mag[card.id] || (svg ? fitScale(card, svg) : 1) };
+});
+document.addEventListener('gesturechange', (ev) => {
+  if (!gestureMag) return;
+  ev.preventDefault();
+  const card = document.getElementById(gestureMag.id);
+  const r = card.getBoundingClientRect();
+  S.fig.mag[gestureMag.id] = Math.min(6, Math.max(0.25, gestureMag.start * ev.scale));
+  applyMag(gestureMag.id, { x: ev.clientX - r.left, y: ev.clientY - r.top });
+});
+document.addEventListener('gestureend', () => { gestureMag = null; });

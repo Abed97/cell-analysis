@@ -23,10 +23,15 @@ def _real(c: pd.DataFrame) -> pd.DataFrame:
 
 
 def _active(exp: Experiment) -> pd.DataFrame:
+    """Cells used in results: not in an excluded track, well or field, nor in a single image
+    that was left out."""
     c = exp.cells
     ex = exp.excluded_tracks()
     if ex:
         c = c[~c["track"].isin(ex)]
+    fm = exp.frame_excluded_mask(c)
+    if fm.any():
+        c = c[~fm]
     return c
 
 
@@ -52,6 +57,7 @@ def well_series(exp: Experiment) -> dict:
     n_frames = len(exp.index["times_min"])
     out = {}
     col = _call_col(c)
+    exf = exp.excluded_frames()
     for well, sub in c.groupby("well", sort=False):
         counts = np.zeros((n_frames, 4))
         tab = sub.groupby(["frame", col]).size()
@@ -59,6 +65,21 @@ def well_series(exp: Experiment) -> dict:
             if 0 <= f < n_frames and 0 <= p < 4:
                 counts[f, p] = v
         total = counts.sum(axis=1)
+        # single images left out: scale the cell count of that time point by the fields that remain,
+        # and leave a gap where none remain
+        keys = [k for k, m in exp.meta.get("movies", {}).items()
+                if m["well"] == well and not exp.movie_excluded(m["well"], m["field"])]
+        incl = np.full(n_frames, float(max(1, len(keys))))
+        for k in keys:
+            for f in exf.get(k, ()):
+                if 0 <= f < n_frames:
+                    incl[f] -= 1
+        gone = incl <= 0
+        if exf:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                total = np.where(gone, np.nan, total * max(1, len(keys)) / np.maximum(incl, 1))
+            counts = counts.copy()
+            counts[gone] = np.nan
         conf = np.full(n_frames, np.nan)
         col_n = np.full(n_frames, np.nan)
         col_a = np.full(n_frames, np.nan)
@@ -66,9 +87,10 @@ def well_series(exp: Experiment) -> dict:
         for m in exp.meta.get("movies", {}).values():
             if m["well"] == well and not exp.movie_excluded(m["well"], m["field"]):
                 arrs = [np.full(n_frames, np.nan) for _ in range(3)]
+                skip = exf.get(f"{m['well']}_{m['field']}", set())
                 for f, v, n, a in zip(m["frames"], m["confluence"], m.get("colonies") or [None] * len(m["frames"]),
                                       m.get("colony_area") or [None] * len(m["frames"])):
-                    if 0 <= f < n_frames:
+                    if 0 <= f < n_frames and f not in skip:
                         arrs[0][f] = np.nan if v is None else v
                         arrs[1][f] = np.nan if n is None else n
                         arrs[2][f] = np.nan if a is None else a
@@ -87,8 +109,9 @@ def well_series(exp: Experiment) -> dict:
                 cnt = np.nansum(np.where(np.isfinite(a_st), n_st, 0), axis=0)
                 col_a = np.where(cnt > 0, tot / np.maximum(cnt, 1), np.nan)  # mean over all colonies
         with np.errstate(divide="ignore", invalid="ignore"):
-            frac = counts / total[:, None] * 100
-            norm = total / total[0] if total[0] > 0 else np.full(n_frames, np.nan)
+            frac = counts / np.nansum(counts, axis=1)[:, None] * 100
+            t0 = next((v for v in total if np.isfinite(v) and v > 0), None)  # first image kept
+            norm = total / t0 if t0 else np.full(n_frames, np.nan)
         out[well] = {"counts": counts, "total": total, "frac": frac, "count_norm": norm, "confluence": conf,
                      "colonies": col_n, "colony_area": col_a}
     return out
@@ -386,9 +409,11 @@ def cohort_paths(exp: Experiment, wells: list[str], min_frames: int = 3) -> list
     for k, g in sub.groupby("track", sort=False):
         calls[k] = (g["frame"].values, g[col].values)
     paths = []
+    exf = exp.excluded_frames()
     founders = t[(t["well"].isin(wells)) & (t["founder"]) & (t["n"] >= min_frames) & (~t.index.isin(ex))]
     for k in founders.index:
         arr = np.full(n_frames, -1, dtype=np.int8)
+        gaps = [f for f in exf.get(f"{t.loc[k, 'well']}_{int(t.loc[k, 'field'])}", ()) if 0 <= f < n_frames]
         cur = k
         guard = 0
         while cur is not None and guard < 100:
@@ -399,6 +424,8 @@ def cohort_paths(exp: Experiment, wells: list[str], min_frames: int = 3) -> list
                 arr[fr[ok]] = cl[ok]
             kids = [x for x in children.get(cur, []) if x in t.index]
             cur = max(kids, key=lambda x: (int(t.loc[x, "n"]), x)) if kids else None
+        if gaps:
+            arr[gaps] = -2  # image left out: not counted at that time point
         paths.append(arr)
     return paths
 
