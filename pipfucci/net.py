@@ -49,7 +49,8 @@ def urlopen(req, timeout: float = 20):
             _good[:] = [name]
             return r
         except urllib.error.HTTPError:
-            raise  # the server answered: certificates are fine
+            _good[:] = [name]  # the server answered, so the certificates were fine
+            raise
         except Exception as e:  # noqa: BLE001
             if not _is_cert_error(e):
                 raise
@@ -60,6 +61,9 @@ def urlopen(req, timeout: float = 20):
 def check(url: str = "https://api.github.com/") -> str:
     """For the build machine and support: which trust store works ("system", "certifi", ...)."""
     req = urllib.request.Request(url, headers={"User-Agent": "CycleTrack"})
-    with urlopen(req, timeout=20) as r:
-        r.read(64)
+    try:
+        with urlopen(req, timeout=20) as r:
+            r.read(64)
+    except urllib.error.HTTPError as e:  # e.g. GitHub's rate limit: the connection itself was secure
+        return f"{_good[0] if _good else '?'} (server said {e.code})"
     return _good[0] if _good else "?"

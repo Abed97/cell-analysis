@@ -98,7 +98,7 @@ jobs:
           SSL_CERT_FILE: /nonexistent/cert.pem
           SSL_CERT_DIR: /nonexistent
         run: |
-          out="$(dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --check-ssl "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest")"
+          out="$(dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --check-ssl "https://github.com/$GITHUB_REPOSITORY/releases/latest")"
           echo "$out"
           grep -q "ssl ok via" <<<"$out"
 
