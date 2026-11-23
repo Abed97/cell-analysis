@@ -300,3 +300,53 @@ def test_scatter_time_points_setting(exp):
     assert exp.settings.scatter_hours == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
     exp.update_settings({"scatter_hours": []})
     assert exp.settings.scatter_hours == []
+
+
+def test_confluence_mask_ignores_brightness_and_confluence():
+    from pipfucci import segment as seg
+
+    rng = np.random.default_rng(3)
+    h, w = 400, 500
+    yy, xx = np.mgrid[:h, :w]
+    img = 120 + rng.normal(0, 2, (h, w))  # smooth medium
+    cells = np.zeros((h, w), bool)
+    for cy, cx in [(100, 100), (110, 130), (300, 350), (200, 250)]:
+        cells |= (yy - cy) ** 2 + (xx - cx) ** 2 < 30 ** 2
+    img[cells] += rng.normal(0, 25, cells.sum())  # textured cells
+    m1, ref = seg.cell_mask(img, 20)
+    truth = cells[::2, ::2]
+    iou = (m1 & truth).sum() / (m1 | truth).sum()
+    assert iou > 0.8
+    m2, _ = seg.cell_mask(img * 0.5, 20)  # a darker exposure finds the same cells
+    assert (m1 ^ m2).mean() < 0.01
+    # an image with no background left falls back to the first image's background
+    full = 120 + rng.normal(0, 25, (h, w))
+    m3, _ = seg.cell_mask(full, 20, ref=ref)
+    assert m3.mean() > 0.95
+    lo, _ = seg.cell_mask(img, 20, sensitivity=0.0)
+    hi, _ = seg.cell_mask(img, 20, sensitivity=1.0)
+    assert lo.sum() <= m1.sum() <= hi.sum()
+    grown, _ = seg.cell_mask(img, 20, adjust_px=8)
+    assert grown.sum() > m1.sum()
+
+
+def test_redraw_confluence_keeps_nuclei(exp):
+    from pipfucci import render
+
+    w, f = exp.tracks.iloc[0]["well"], int(exp.tracks.iloc[0]["field"])
+    lab0 = render.masks_for(exp, w, f).labels(3).copy()
+    r = exp.update_settings({"conf_sensitivity": 0.2})
+    assert r["action"] == "remask" and exp.mask_settings_changed() and exp.stale is None
+    exp.remask(workers=1)
+    assert not exp.mask_settings_changed()
+    render._masks.clear()
+    m = render.masks_for(exp, w, f)
+    assert np.array_equal(m.labels(3), lab0) and m.cells(3) is not None
+    exp.update_settings({"conf_sensitivity": 0.5})
+    exp.remask(workers=1)
+
+
+def test_figure_axes_setting(exp):
+    exp.update_settings({"fig_axes": {"fig-a": {"x": {"min": "0", "max": 12, "step": -2}, "y": {}}, "x": 5}})
+    assert exp.settings.fig_axes == {"fig-a": {"x": {"min": 0.0, "max": 12.0}}}
+    exp.update_settings({"fig_axes": {}})

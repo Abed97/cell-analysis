@@ -229,3 +229,7 @@ table.dur td:last-child { text-align: right; font-family: var(--mono); }
 .ex-ticks { position: relative; height: 8px; margin: -6px 0 0; }
 .ex-ticks span { position: absolute; top: 0; width: 3px; height: 8px; border-radius: 1px; background: #FF6B6B; transform: translateX(-1px); }
 .ex-list { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }
+.axes-ed { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 8px; background: var(--panel2); }
+.ax-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ax-l { min-width: 170px; font-size: 13px; font-weight: 600; }
+.ax-in { width: 92px; height: 34px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line2); background: var(--well); color: var(--text); font-family: var(--mono); }

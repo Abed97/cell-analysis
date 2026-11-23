@@ -149,6 +149,7 @@ def experiment_state(exp) -> dict:
         "run": exp.meta.get("run", {}).get("finished") if exp.has_results else None,
         "floor": exp.meta.get("floor"),
         "old_format": bool(exp.has_results and "interp" not in exp.cells.columns),
+        "mask_stale": exp.mask_settings_changed(),
         "excluded_wells": sorted(exp.excluded_wells()),
         "linked": linked_info(exp),
         "saved_at": _saved_at(exp),
@@ -431,6 +432,15 @@ def run_analysis():
     return {"ok": True}
 
 
+def run_remask():
+    exp = need_results()
+    from .updater import load_prefs
+
+    workers = load_prefs().get("workers") or None
+    STATE.start_job("remask", lambda report: exp.remask(progress=report, cancel=STATE.cancel, workers=workers))
+    return {"ok": True}
+
+
 def run_remeasure():
     exp = need_results()
     from .updater import load_prefs
@@ -653,6 +663,8 @@ class Handler(BaseHTTPRequestHandler):
                 exp = need_exp()
                 exp.update_settings({"linked": [p for p in exp.settings.linked if p != b.get("path")]})
                 return self._json(state())
+            if ep == "remask":
+                return self._json(run_remask())
             if ep == "save_figure":
                 return self._json(save_figure(b))
             if ep == "restart":

@@ -80,7 +80,8 @@ images become gaps (or, if a well has other fields at that time, the count is sc
 that remain) in every chart, figure and Prism table, and are marked `excluded` in the per-cell and
 per-track tables.
 
-**Figures** can be zoomed with − / + or a pinch (scroll to move around), and the time axis of
+**Axes** on every figure can be set by hand (from, to, tick step; empty = automatic), saved with
+the experiment and used by *Export all*. **Figures** can be zoomed with − / + or a pinch (scroll to move around), and the time axis of
 time-course figures narrowed by dragging across a range. The red-vs-green figure takes the time
 points you type (up to 8; the Population page uses the same ones). *Cell-cycle composition of all
 cells* is the stacked version for every cell in the images at each time point; *Cell-cycle
@@ -91,7 +92,12 @@ and SVG into one dated folder in `PIP-FUCCI results/figures/`: composition, phas
 fractions (followed cells and all cells), growth and confluence, colonies (lines and box plots) and
 red-vs-green plots.
 
-**Confluence and colonies** come from a phase-contrast mask of every cell, coloured or not.
+**Confluence and colonies** come from a phase-contrast mask of every cell, coloured or not. Each
+image is compared with its own empty background (local texture of the log image, so brightness and
+exposure changes between images don't matter); an image with no background left uses the field's
+first image. In Segment & gate, *Confluence mask* has **Sensitivity**, **Join gaps up to** (µm) and
+**Grow / shrink edge** (µm); the overlay follows them at once, and **Apply to all images** redraws
+every mask (nuclei and tracks are kept, no re-analysis).
 Objects smaller than *Smallest object counted* (step 2, default 50 µm²) are debris: drawn with an
 orange outline and left out. Touching cells form one colony; the Population and Figures pages
 plot colony number per image and average colony area over time, as lines (mean ± SEM across

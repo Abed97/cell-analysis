@@ -27,6 +27,7 @@ from .settings import Settings, default_conditions, load_json, save_json
 SEG_KEYS = {"channel_map", "nucleus_um", "pixel_um", "sensitivity", "method", "bg_radius_um"}
 TRACK_KEYS = {"interval_min", "max_speed_um_h", "max_gap_h", "colourless_h"}
 MEASURE_KEYS = {"min_object_um2"}  # only the confluence / colony numbers: re-measured from saved masks
+MASK_KEYS = {"conf_sensitivity", "conf_bridge_um", "conf_adjust_um"}  # confluence masks: redrawn from the images
 CLASSIFY_KEYS = {"smoothing_h", "gate_green", "gate_red", "parental_well"}
 
 
@@ -304,6 +305,8 @@ class Experiment:
                     self.classify()
                     self._save_results()
                     action = "reclassified"
+                elif changed & MASK_KEYS and self.stale is None:
+                    action = "remask"
                 elif changed & MEASURE_KEYS and self.stale is None:
                     action = "remeasure"
             self.save()
@@ -322,6 +325,7 @@ class Experiment:
             "min_cycle_frames": max(2, int(round(10.0 / s.interval_h))),
             "sensitivity": s.sensitivity,
             "method": s.method,
+            "conf": s.mask_params(),
             "min_object_halfpx": s.min_object_um2 / (2 * s.pixel_um) ** 2,  # cell masks are stored at half size
             "halfpx_um2": (2 * s.pixel_um) ** 2,
         }
@@ -349,7 +353,7 @@ class Experiment:
                 fr = frames[i:i + CHUNK]
                 chunk_jobs.append({"movie": mv, "frames": fr, "paths": {f: paths[f] for f in fr},
                                    "prev": paths[frames[i - 1]] if i > 0 else None, "settings": sd,
-                                   "mask_path": str(mdir / f"chunk_{fr[0]:05d}.npz"), "conf_thr": None})
+                                   "mask_path": str(mdir / f"chunk_{fr[0]:05d}.npz"), "conf_ref": None})
         return chunk_jobs, movie_info, sd
 
     def _swap_masks(self) -> None:
@@ -405,7 +409,7 @@ class Experiment:
                                 on_frame=prepared)
                 thr_of = dict(zip(mvs, thrs))
                 for j in chunk_jobs:
-                    j["conf_thr"] = thr_of.get(j["movie"])
+                    j["conf_ref"] = thr_of.get(j["movie"])
                 t0 = time.time()
                 report("Segmenting")
                 seg_results = pool.map(segment_chunk, chunk_jobs, cancel,
@@ -452,7 +456,65 @@ class Experiment:
             raise
         progress(stage="Done", done=total, total=total, fraction=1.0, eta_s=0)
 
-    def remeasure(self, progress=None, cancel: threading.Event | None = None, workers: int | None = None) -> None:
+    def mask_settings_changed(self) -> bool:
+        """The confluence settings differ from those the saved masks were made with."""
+        if not self.has_results:
+            return False
+        return self.meta.get("mask_params", "legacy") != self.settings.mask_params()
+
+    def remask(self, progress=None, cancel: threading.Event | None = None, workers: int | None = None) -> None:
+        """Redraw every confluence mask from the phase images with the current confluence settings
+        (nuclei and tracks are kept), then measure confluence and colonies again."""
+        from .pipeline import remask_job, threshold_job
+
+        progress = progress or (lambda **kw: None)
+        cancel = cancel or threading.Event()
+        mf = self.movie_files()
+        with self.lock:
+            sd = self.derived_numbers()
+            movies = dict(self.meta.get("movies", {}))
+        jobs, refs = [], []
+        by_key = {movie_key(*mv): mv for mv in mf.movies()}
+        for key, m in movies.items():
+            mv = by_key.get(key)
+            if mv is None:
+                continue
+            phase = {f: mf.files[mv][f].get("phase") for f in mf.frames(mv) if mf.files[mv][f].get("phase")}
+            if not phase:
+                continue
+            first = sorted(phase)[:1] + [sorted(phase)[len(phase) // 2]]
+            refs.append({"movie": key, "paths": [phase[f] for f in first], "nucleus_px": sd["nucleus_px"]})
+            for ch in sorted((self.results_dir / "masks" / key).glob("chunk_*.npz")):
+                jobs.append({"movie": key, "chunk": str(ch), "phase": phase, "settings": sd})
+        if not jobs:
+            raise ValueError("No saved masks or phase-contrast images to redraw the confluence from.")
+        total = max(1, sum(len(movies[k]["frames"]) for k in {j["movie"] for j in jobs}))
+        state = {"done": 0}
+        t0 = time.time()
+
+        def tick():
+            state["done"] += 1
+            frac = min(0.95, state["done"] / total)
+            el = time.time() - t0
+            progress(stage="Redrawing confluence", done=state["done"], total=total, unit="images",
+                     fraction=frac * 0.9, eta_s=(el / frac - el) if frac > 0.03 else None, workers=workers)
+
+        progress(stage="Redrawing confluence", done=0, total=total, unit="images", fraction=0.0, eta_s=None)
+        workers = workers or worker_count(len(jobs))
+        with WorkerPool(workers) as pool:
+            ref_of = dict(zip([r["movie"] for r in refs], pool.map(threshold_job, refs, cancel)))
+            for j in jobs:
+                j["ref"] = ref_of.get(j["movie"])
+            pool.map(remask_job, jobs, cancel, on_frame=tick)
+        def measured(**kw):
+            done = kw.get("stage") == "Done"
+            progress(**{**kw, "stage": "Done" if done else "Measuring confluence",
+                        "fraction": 1.0 if done else 0.9 + 0.1 * (kw.get("fraction") or 0)})
+
+        self.remeasure(progress=measured, cancel=cancel, workers=workers, remasked=True)
+
+    def remeasure(self, progress=None, cancel: threading.Event | None = None, workers: int | None = None,
+                  remasked: bool = False) -> None:
         """Confluence and colonies again from the saved cell masks (after the debris size changed)."""
         progress = progress or (lambda **kw: None)
         cancel = cancel or threading.Event()
@@ -483,6 +545,8 @@ class Experiment:
                 m["colony_area"] = r["colony_area"]
             self.meta["measured_min_object_um2"] = self.settings.min_object_um2
             self.meta["colony_sizes"] = 1
+            if remasked:
+                self.meta["mask_params"] = self.settings.mask_params()
             save_json(self.results_dir / "meta.json", self.meta)
         progress(stage="Done", done=total, total=total, fraction=1.0, eta_s=0)
 
@@ -526,6 +590,7 @@ class Experiment:
             "movies": movies_meta,
             "measured_min_object_um2": self.settings.min_object_um2,
             "colony_sizes": 1,
+            "mask_params": self.settings.mask_params(),
             "parents": parents,
             "low_conf": sorted(low_conf),
             "times_min": self.index["times_min"],

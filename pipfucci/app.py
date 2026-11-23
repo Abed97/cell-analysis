@@ -99,7 +99,7 @@ def watch_jobs(window, port: int) -> None:
             p = json.loads(urllib.request.urlopen(base + "/api/progress", timeout=5).read())
         except Exception:
             continue
-        long_job = p.get("job") in ("analysis", "retrack", "measure")
+        long_job = p.get("job") in ("analysis", "retrack", "measure", "remask")
         if p.get("running") and long_job:
             if p.get("job") == "analysis":
                 macos.request_notifications()
@@ -129,7 +129,7 @@ def watch_jobs(window, port: int) -> None:
                     if failed:
                         macos.notify("Analysis stopped", f"{name}: {p.get('error')}")
                     else:
-                        what = "Tracks updated" if job == "retrack" else "Analysis finished"
+                        what = {"retrack": "Tracks updated", "remask": "Confluence redrawn"}.get(job, "Analysis finished")
                         mins = (p.get("finished", 0) - p.get("started", 0)) / 60 if p.get("finished") else None
                         took = f" in {mins:.0f} min" if mins and mins >= 1 else ""
                         macos.notify(what, f"{name} is ready{took}. Open {DISPLAY_NAME} to see the results.")

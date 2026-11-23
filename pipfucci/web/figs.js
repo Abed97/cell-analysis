@@ -53,13 +53,56 @@ function boxStats(sorted) {
 
 function seeded(seed = 7) { return () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }; }
 
+// ---------------------------------------------------------------- axes set by hand
+// Settings: fig_axes[figure][axis] = { min, max, step } (any may be missing = automatic).
+let FIG_ID = null;  // the figure being drawn (its axis settings apply)
+
+function axSpec(key, id = FIG_ID) {
+  const a = (((S.st && S.st.experiment.settings.fig_axes) || {})[id] || {})[key];
+  return a && (a.min != null || a.max != null || a.step != null) ? a : null;
+}
+
+function stepTicks(a, b, step, maxN = 40) {
+  const out = [];
+  if (!(step > 0) || (b - a) / step > maxN) return null;
+  for (let v = Math.ceil(a / step - 1e-9) * step; v <= b + 1e-9; v += step) out.push(+v.toFixed(6));
+  return out;
+}
+
+function rangeTicks(a, b) {  // nice steps that include both ends when they fall on a step
+  const raw = (b - a) / 5;
+  const p = 10 ** Math.floor(Math.log10(Math.max(raw, 1e-9)));
+  const st = [1, 2, 2.5, 5, 10].map((m) => m * p).find((v) => v >= raw);
+  return stepTicks(a, b, st) || [a, b];
+}
+
+// y range: the automatic one ({ ymax, ticks }, from 0) unless set by hand
+function yRange(auto, key = 'y') {
+  const sp = axSpec(key);
+  if (!sp) return { ymin: 0, ymax: auto.ymax, ticks: auto.ticks };
+  const ymin = sp.min != null ? sp.min : 0, ymax = sp.max != null ? sp.max : Math.max(auto.ymax, ymin + 1e-6);
+  if (!(ymax > ymin)) return { ymin: 0, ymax: auto.ymax, ticks: auto.ticks };
+  return { ymin, ymax, ticks: (sp.step && stepTicks(ymin, ymax, sp.step)) || (sp.min == null && sp.max == null ? auto.ticks : rangeTicks(ymin, ymax)), manual: true };
+}
+
+// time range: a drag-zoom wins, then the range set by hand, then everything
+function xRange(zoom, hFull) {
+  const sp = axSpec('x');
+  const h0 = zoom ? zoom.h0 : sp && sp.min != null ? sp.min : 0;
+  const h1 = zoom ? zoom.h1 : sp && sp.max != null ? sp.max : hFull;
+  const ok = h1 > h0;
+  const a = ok ? h0 : 0, b = ok ? h1 : hFull;
+  return { h0: a, h1: b, ticks: (sp && sp.step && stepTicks(a, b, sp.step)) || hourTicks(a, b) };
+}
+
 // one zoomable time frame (axes + clip) inside a publication figure
-function pubTime(x0, t, pw, ph, hFull, zoom, yticks, ymax, yfmt) {
-  const h0 = zoom ? zoom.h0 : 0, h1 = zoom ? zoom.h1 : hFull;
-  const sx = (h) => x0 + (h - h0) / (h1 - h0) * pw, sy = (v) => t + ph - Math.min(Math.max(v, 0), ymax) / ymax * ph;
+function pubTime(x0, t, pw, ph, hFull, zoom, yticks, ymax, yfmt, ymin = 0) {
+  const { h0, h1, ticks } = xRange(zoom, hFull);
+  const sx = (h) => x0 + (h - h0) / (h1 - h0) * pw;
+  const sy = (v) => t + ph - (Math.min(Math.max(v, ymin), ymax) - ymin) / (ymax - ymin) * ph;
   const cid = ixId();
   const s = `<defs><clipPath id="${cid}"><rect x="${x0}" y="${t - 1}" width="${pw}" height="${ph + 2}"/></clipPath></defs>`
-    + yAxis(x0, t, t + ph, yticks, sy, yfmt) + xAxis(t + ph, x0, x0 + pw, hourTicks(h0, h1), sx);
+    + yAxis(x0, t, t + ph, yticks, sy, yfmt) + xAxis(t + ph, x0, x0 + pw, ticks, sx);
   return { s, sx, sy, cid, h0, h1 };
 }
 
@@ -83,7 +126,8 @@ function figComposition(d, conds, zoom = null) {
   const panels = [];
   conds.forEach((c, i) => {
     const x0 = l + i * (pw + gap);
-    const f = pubTime(x0, t, pw, ph, hFull, zoom, [0, 25, 50, 75, 100], 100);
+    const yr = yRange({ ymax: 100, ticks: [0, 25, 50, 75, 100] });
+    const f = pubTime(x0, t, pw, ph, hFull, zoom, yr.ticks, yr.ymax, (v) => v, yr.ymin);
     s += f.s + `<g clip-path="url(#${f.cid})">`;
     const cum = hours.map(() => 0);
     CATS.forEach((k) => {
@@ -125,7 +169,8 @@ function figPopComposition(pop, conds, zoom = null) {
   cs.forEach((c, i) => {
     const p = by[c.id];
     const x0 = l + i * (pw + gap);
-    const f = pubTime(x0, t, pw, ph, hFull, zoom, [0, 25, 50, 75, 100], 100);
+    const yr = yRange({ ymax: 100, ticks: [0, 25, 50, 75, 100] });
+    const f = pubTime(x0, t, pw, ph, hFull, zoom, yr.ticks, yr.ymax, (v) => v, yr.ymin);
     // the wells' mean fractions, rescaled to add up to exactly 100% at every time point
     const vals = {};
     cats.forEach((k) => { vals[k] = []; });
@@ -180,10 +225,11 @@ function figDurations(d, conds) {
     const x0 = l + pi * (pw + gap);
     let mx = 4;
     conds.forEach((c) => (c.durations[k] || []).forEach((v) => { mx = Math.max(mx, v); }));
-    const ymax = niceMax(mx * 1.05, [4, 6, 8, 10, 12, 16, 20, 24, 30, 36, 48, 60, 72, 96]);
-    const st = ymax <= 12 ? 2 : ymax <= 24 ? 4 : ymax <= 48 ? 12 : 24;
-    const ticks = []; for (let v = 0; v <= ymax + 1e-6; v += st) ticks.push(v);
-    const sy = (v) => t + ph - v / ymax * ph;
+    const autoMax = niceMax(mx * 1.05, [4, 6, 8, 10, 12, 16, 20, 24, 30, 36, 48, 60, 72, 96]);
+    const st = autoMax <= 12 ? 2 : autoMax <= 24 ? 4 : autoMax <= 48 ? 12 : 24;
+    const autoTicks = []; for (let v = 0; v <= autoMax + 1e-6; v += st) autoTicks.push(v);
+    const { ymin, ymax, ticks } = yRange({ ymax: autoMax, ticks: autoTicks });
+    const sy = (v) => t + ph - (Math.min(Math.max(v, ymin), ymax) - ymin) / (ymax - ymin) * ph;
     s += yAxis(x0, t, t + ph, ticks, sy) + `<path d="M${x0} ${t + ph}H${x0 + pw}" stroke="#000"/>`;
     s += `<text x="${x0 + pw / 2}" y="${t - 14}" font-size="13" font-weight="700" text-anchor="middle" fill="#000">${title}</text>`;
     const panel = { type: 'box', x0, x1: x0 + pw, y0: t, y1: t + ph, boxes: [], dots: [], ring: '#111' };
@@ -221,14 +267,15 @@ function figLines({ hours, conds, panelsDef, zoom, label, ylabel, legendFn, band
   const t = 40 + conds.length * 16;
   const W = l + panelsDef.length * pw + (panelsDef.length - 1) * gap + 16, H = t + ph + b;
   const hFull = hours[hours.length - 1] || 1;
-  const h0 = zoom ? zoom.h0 : 0, h1 = zoom ? zoom.h1 : hFull;
   let s = svgOpen(W, H, label);
   const panels = [];
   panelsDef.forEach((pd, pi) => {
     const x0 = l + pi * (pw + gap);
     const data = conds.map((c) => pd.get(c)).map((x) => x || { mean: [], sem: null });
-    let { ymax, ticks } = pd.scale ? pd.scale(visibleMax(hours, data.map((x) => ({ mean: x.mean, sem: band ? x.sem : null })), h0, h1)) : { ymax: pd.ymax, ticks: pd.ticks };
-    const f = pubTime(x0, t, pw, ph, hFull, zoom, ticks, ymax, pd.fmtTick || ((v) => v));
+    const xr = xRange(zoom, hFull);
+    const auto = pd.scale ? pd.scale(visibleMax(hours, data.map((x) => ({ mean: x.mean, sem: band ? x.sem : null })), xr.h0, xr.h1)) : { ymax: pd.ymax, ticks: pd.ticks };
+    const { ymin, ymax, ticks } = yRange(auto, pd.ax || 'y');
+    const f = pubTime(x0, t, pw, ph, hFull, zoom, ticks, ymax, pd.fmtTick || ((v) => v), ymin);
     s += f.s;
     s += `<text x="${x0 + pw / 2}" y="18" font-size="13" font-weight="700" text-anchor="middle" fill="#000">${pd.title}</text>`;
     s += `<text x="${x0 + pw / 2}" y="${H - 10}" font-size="12" text-anchor="middle" fill="#000">Time (h)</text>`;
@@ -241,7 +288,7 @@ function figLines({ hours, conds, panelsDef, zoom, label, ylabel, legendFn, band
       dd.mean.forEach((v, j) => {
         if (v == null) return;
         const e = band && dd.sem ? (dd.sem[j] || 0) : 0;
-        up.push(`${r1(f.sx(hours[j]))} ${r1(f.sy(v + e))}`); lo.push(`${r1(f.sx(hours[j]))} ${r1(f.sy(Math.max(0, v - e)))}`); ln.push(`${r1(f.sx(hours[j]))} ${r1(f.sy(v))}`);
+        up.push(`${r1(f.sx(hours[j]))} ${r1(f.sy(v + e))}`); lo.push(`${r1(f.sx(hours[j]))} ${r1(f.sy(v - e))}`); ln.push(`${r1(f.sx(hours[j]))} ${r1(f.sy(v))}`);
       });
       if (!ln.length) return;
       if (band && dd.sem) s += `<path d="M${up.join('L')}L${lo.reverse().join('L')}Z" fill="${esc(c.color)}" fill-opacity="0.18" stroke="none"/>`;
@@ -279,8 +326,8 @@ function figColonies(pop, conds, zoom = null) {
   return figLines({ hours: pop.hours, conds: cs, zoom, band: true, label: 'Colonies over time', pw: 280, gap: 70,
     legendFn: (c) => `${shortName(c.name)} (${by[c.id].wells.length} well${by[c.id].wells.length === 1 ? '' : 's'})`,
     panelsDef: [
-      { title: 'Colony number', ylabel: 'Colonies per image', fmt: (v) => ixNum(v, 1), get: (c) => by[c.id].colonies, scale: autoScale },
-      { title: 'Average colony area', ylabel: 'Mean colony area (µm²)', fmt: um2, fmtTick: kFmt, get: (c) => by[c.id].colony_area, scale: autoScale },
+      { title: 'Colony number', ylabel: 'Colonies per image', ax: 'y0', fmt: (v) => ixNum(v, 1), get: (c) => by[c.id].colonies, scale: autoScale },
+      { title: 'Average colony area', ylabel: 'Mean colony area (µm²)', ax: 'y1', fmt: um2, fmtTick: kFmt, get: (c) => by[c.id].colony_area, scale: autoScale },
     ] });
 }
 
@@ -300,15 +347,15 @@ function figGrowth(pop, conds, zoom = null) {
   return figLines({ hours: pop.hours, conds: cs, zoom, band: true, label: 'Growth and confluence', pw: 250, gap: 70,
     legendFn: (c) => `${shortName(c.name)} (${by[c.id].wells.length} well${by[c.id].wells.length === 1 ? '' : 's'})`,
     panelsDef: [
-      { title: 'Cell number', ylabel: 'Fold of first frame', ref: 1, fmt: (v) => ixNum(v, 2) + '×', get: (c) => by[c.id].count_norm, scale: autoScale },
-      { title: 'Nuclei per well', ylabel: 'Nuclei', fmt: (v) => ixNum(v, 0), fmtTick: kFmt, get: (c) => by[c.id].total, scale: autoScale },
-      { title: 'Confluence', ylabel: '% of area covered', fmt: pct, get: (c) => by[c.id].confluence, scale: pctScale },
+      { title: 'Cell number', ylabel: 'Fold of first frame', ax: 'y0', ref: 1, fmt: (v) => ixNum(v, 2) + '×', get: (c) => by[c.id].count_norm, scale: autoScale },
+      { title: 'Nuclei per well', ylabel: 'Nuclei', ax: 'y1', fmt: (v) => ixNum(v, 0), fmtTick: kFmt, get: (c) => by[c.id].total, scale: autoScale },
+      { title: 'Confluence', ylabel: '% of area covered', ax: 'y2', fmt: pct, get: (c) => by[c.id].confluence, scale: pctScale },
     ] });
 }
 
 // ---------------------------------------------------------------- box plots over time (colonies)
 // One panel: groups of boxes at each time point, one box per condition.
-function boxTimePanel({ s0 = '', x0, t, pw, ph, theme, times, conds, key, log = false, title = '', ylabel = '' }) {
+function boxTimePanel({ s0 = '', x0, t, pw, ph, theme, times, conds, key, log = false, title = '', ylabel = '', ax = null }) {
   const T = TH[theme];
   const nc = Math.max(1, conds.length), ng = Math.max(1, times.length);
   const gw = pw / ng, bw = Math.min(34, gw * 0.84 / nc);
@@ -322,15 +369,20 @@ function boxTimePanel({ s0 = '', x0, t, pw, ph, theme, times, conds, key, log = 
     vmin = Math.min(vmin, st.min != null ? Math.max(1, st.min) : Math.max(1, st.lo));
   }));
   let sy, ticks, fmtTick;
+  const sp = ax ? axSpec(ax) : null;
   if (area && log && vmax > 0) {
-    const a = Math.floor(Math.log10(Math.max(1, vmin))), bb = Math.ceil(Math.log10(Math.max(10, vmax)));
-    sy = (v) => t + ph - (Math.log10(Math.max(v, 10 ** a)) - a) / (bb - a) * ph;
-    ticks = []; for (let e = a; e <= bb; e++) ticks.push(10 ** e);
+    let a = Math.floor(Math.log10(Math.max(1, vmin))), bb = Math.ceil(Math.log10(Math.max(10, vmax)));
+    if (sp && sp.min > 0) a = Math.log10(sp.min);
+    if (sp && sp.max > 0) bb = Math.log10(sp.max);
+    if (!(bb > a)) { a = Math.floor(Math.log10(Math.max(1, vmin))); bb = a + 1; }
+    sy = (v) => t + ph - (Math.min(Math.max(Math.log10(Math.max(v, 1e-9)), a), bb) - a) / (bb - a) * ph;
+    ticks = []; for (let e = Math.ceil(a - 1e-9); e <= bb + 1e-9; e++) ticks.push(10 ** e);
     fmtTick = (v) => (v >= 1e6 ? v / 1e6 + 'M' : v >= 1e3 ? v / 1e3 + 'k' : String(v));
   } else {
     const r = niceTicks(Math.max(vmax * 1.05, area ? 100 : 4));
-    sy = (v) => t + ph - Math.max(0, v) / r.ymax * ph;
-    ticks = r.ticks;
+    const yr = ax ? yRange({ ymax: r.ymax, ticks: r.ticks }, ax) : { ymin: 0, ymax: r.ymax, ticks: r.ticks };
+    sy = (v) => t + ph - (Math.min(Math.max(v, yr.ymin), yr.ymax) - yr.ymin) / (yr.ymax - yr.ymin) * ph;
+    ticks = yr.ticks;
     fmtTick = area ? kFmt : (v) => String(+v.toFixed(2));
   }
   let s = s0;
@@ -390,8 +442,8 @@ function figColonyBoxes(dist, conds, log) {
   const t = 40 + conds.length * 16;
   const W = l + 2 * pw + gap + 16, H = t + ph + 52;
   let s = svgOpen(W, H, 'Colonies over time, box plots');
-  const a = boxTimePanel({ x0: l, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'counts', title: 'Colony number', ylabel: 'Colonies per image' });
-  const b = boxTimePanel({ x0: l + pw + gap, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'areas', log, title: `Colony area${log ? ' (log scale)' : ''}`, ylabel: 'Colony area (µm²)' });
+  const a = boxTimePanel({ x0: l, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'counts', title: 'Colony number', ylabel: 'Colonies per image', ax: 'y0' });
+  const b = boxTimePanel({ x0: l + pw + gap, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'areas', log, title: `Colony area${log ? ' (log scale)' : ''}`, ylabel: 'Colony area (µm²)', ax: 'y1' });
   s += a.s + b.s;
   // legend (boxes)
   conds.forEach((c, j) => { const y = 36 + j * 16; s += `<rect x="${l + 8}" y="${y - 10}" width="14" height="11" fill="${esc(c.color)}" fill-opacity="0.35" stroke="#000"/><text x="${l + 28}" y="${y}" font-size="11" fill="#000">${esc(shortName(c.name))}</text>`; });
@@ -400,21 +452,24 @@ function figColonyBoxes(dist, conds, log) {
 
 // G: red vs green (FUCCI) plots at four time points, per condition, from the open experiment
 function figScatter(sc, conds, tps, hours, gates) {
-  const cell = 150, gap = 18, l = 70, t = 46, b = 46;
+  const cell = 150, gap = 18, l = 92, t = 46, b = 50;
   const nr = conds.length, ncol = tps.length;
   const W = l + ncol * cell + (ncol - 1) * gap + 16, H = t + nr * cell + (nr - 1) * gap + b;
   let s = svgOpen(W, H, 'Red versus green at selected time points');
   const panels = [];
-  const lim = 1.25;
+  const gx = axSpec('x') || {}, gy = axSpec('y') || {};
+  const gx0 = gx.min != null ? gx.min : 0, gx1 = gx.max != null && gx.max > gx0 ? gx.max : 1.25;
+  const ry0 = gy.min != null ? gy.min : 0, ry1 = gy.max != null && gy.max > ry0 ? gy.max : 1.25;
   conds.forEach((c, ri) => {
     tps.forEach((f, ci) => {
       const x0 = l + ci * (cell + gap), y0 = t + ri * (cell + gap);
       const d = sc[`${c.id}|${f}`];
-      const sx = (g) => x0 + Math.min(g, lim) / lim * cell, sy = (r) => y0 + cell - Math.min(r, lim) / lim * cell;
+      const sx = (g) => x0 + (Math.min(Math.max(g, gx0), gx1) - gx0) / (gx1 - gx0) * cell;
+      const sy = (r) => y0 + cell - (Math.min(Math.max(r, ry0), ry1) - ry0) / (ry1 - ry0) * cell;
       s += `<rect x="${x0}" y="${y0}" width="${cell}" height="${cell}" fill="none" stroke="#000"/>`;
       if (d) {
         const n = d.r.length;
-        for (let i = 0; i < n; i++) s += `<circle cx="${r1(sx(d.g[i]))}" cy="${r1(sy(d.r[i]))}" r="1.3" fill="${[PUB.G1, PUB.S, PUB.G2M, '#999'][d.raw[i]]}" fill-opacity="0.6"/>`;
+        for (let i = 0; i < n; i++) if (d.g[i] >= gx0 && d.g[i] <= gx1 && d.r[i] >= ry0 && d.r[i] <= ry1) s += `<circle cx="${r1(sx(d.g[i]))}" cy="${r1(sy(d.r[i]))}" r="1.3" fill="${[PUB.G1, PUB.S, PUB.G2M, '#999'][d.raw[i]]}" fill-opacity="0.6"/>`;
         s += `<path d="M${r1(sx(gates.g))} ${y0}V${y0 + cell}M${x0} ${r1(sy(gates.r))}H${x0 + cell}" stroke="#000" stroke-dasharray="4 3"/>`;
         const cnt = d.counts, tot = Math.max(1, d.n);
         s += `<text x="${x0 + cell - 4}" y="${y0 + 12}" font-size="9" text-anchor="end" fill="#000">n=${d.n}</text>`;
@@ -423,10 +478,20 @@ function figScatter(sc, conds, tps, hours, gates) {
           info: `<div class="h"><span class="sw" style="background:${c.color}"></span>${ixEsc(c.name)} · ${ixNum(hours[f], 1)} h</div>` + ['G1', 'S', 'G2/M', 'Dim'].map((nm, k) => `<div class="r"><span class="n">${nm}</span><span class="v">${Math.round(cnt[k] / tot * 100)}%</span></div>`).join('') + `<div class="r"><span class="n">Nuclei</span><span class="v">${d.n}</span></div>` }] });
       }
       if (ri === 0) s += `<text x="${x0 + cell / 2}" y="${t - 10}" font-size="12" font-weight="700" text-anchor="middle" fill="#000">${ixNum(hours[f], 1)} h</text>`;
-      if (ci === 0) s += `<text x="${l - 12}" y="${y0 + cell / 2}" font-size="12" font-weight="700" text-anchor="middle" fill="${esc(c.color)}" transform="rotate(-90 ${l - 12} ${y0 + cell / 2})">${esc(shortName(c.name, 18))}</text>`;
+      if (ci === 0) s += `<text x="${l - 34}" y="${y0 + cell / 2}" font-size="12" font-weight="700" text-anchor="middle" fill="${esc(c.color)}" transform="rotate(-90 ${l - 34} ${y0 + cell / 2})">${esc(shortName(c.name, 18))}</text>`;
     });
   });
-  s += `<text x="${l + (W - l) / 2}" y="${H - 12}" font-size="12" text-anchor="middle" fill="#000">PIP-mVenus (green, normalised)</text>`;
+  // axis ticks on the bottom row and the left column
+  const gt = (gx.step && stepTicks(gx0, gx1, gx.step, 12)) || rangeTicks(gx0, gx1), rt = (gy.step && stepTicks(ry0, ry1, gy.step, 12)) || rangeTicks(ry0, ry1);
+  tps.forEach((f, ci) => {
+    const x0 = l + ci * (cell + gap), yb = t + nr * cell + (nr - 1) * gap;
+    gt.forEach((v) => { const x = r1(x0 + (v - gx0) / (gx1 - gx0) * cell); s += `<path d="M${x} ${yb}V${yb + 3}" stroke="#000"/><text x="${x}" y="${yb + 13}" font-size="8" text-anchor="middle" fill="#000">${+v.toFixed(2)}</text>`; });
+  });
+  conds.forEach((c, ri) => {
+    const y0 = t + ri * (cell + gap);
+    rt.forEach((v) => { const y = r1(y0 + cell - (v - ry0) / (ry1 - ry0) * cell); s += `<path d="M${l - 3} ${y}H${l}" stroke="#000"/><text x="${l - 5}" y="${(+y + 3).toFixed(1)}" font-size="8" text-anchor="end" fill="#000">${+v.toFixed(2)}</text>`; });
+  });
+  s += `<text x="${l + (W - l) / 2}" y="${H - 8}" font-size="12" text-anchor="middle" fill="#000">PIP-mVenus (green, normalised)</text>`;
   s += `<text x="14" y="${t + (H - t - b) / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 14 ${t + (H - t - b) / 2})">mCherry-Geminin (red, normalised)</text>`;
   return { svg: s + '</svg>', panels };
 }
@@ -464,7 +529,25 @@ async function figData(force = false) {
   return S.fig.ctx;
 }
 
+function inFig(id, fn) {
+  const prev = FIG_ID;
+  FIG_ID = id;
+  try { return fn(); } finally { FIG_ID = prev; }
+}
+
+const AX_TIME = { k: 'x', label: 'Time (h)' };
+const AX_PCT = { k: 'y', label: '% of cells' };
+
 function figDefs(ctx) {
+  return figDefsRaw(ctx).map((d) => {
+    const out = { ...d };
+    if (d.build) out.build = (z) => inFig(d.id, () => d.build(z));
+    if (d.variants) out.variants = d.variants.map((v) => ({ ...v, build: () => inFig(d.id, () => v.build()) }));
+    return out;
+  });
+}
+
+function figDefsRaw(ctx) {
   const { d, pop, dist } = ctx;
   const shown = d.conditions.filter((c) => !c.hidden && c.n > 0);
   const shownAll = d.conditions.filter((c) => !c.hidden);
@@ -475,30 +558,33 @@ function figDefs(ctx) {
   return [
     { id: 'fig-a', title: 'Cell-cycle composition over time', time: true, ok: shown.length,
       sub: 'Every cell present in the first frame (a founder) is followed through its divisions, along one daughter each time. Colourless = neither reporter on; Unclassified = no longer tracked (lost or left the field).',
-      build: (z) => figComposition(d, shown, z) },
+      axes: [AX_TIME, AX_PCT], build: (z) => figComposition(d, shown, z) },
     { id: 'fig-a2', title: 'Cell-cycle composition of all cells over time', time: true, ok: shownAll.length,
       sub: 'Every cell in the images at each time point, not only the founders and their daughters: the share in each phase per well, averaged over the wells of a condition. Images left out (blurry) are skipped.',
-      build: (z) => figPopComposition(pop, shownAll, z) },
+      axes: [AX_TIME, AX_PCT], build: (z) => figPopComposition(pop, shownAll, z) },
     { id: 'fig-b', title: 'Time spent in each phase', ok: shown.length, clickable: true,
       sub: 'Hours in each phase, for phases seen from start to end inside the movie. One dot per cell per phase; boxes show the median and quartiles, whiskers 1.5 × IQR. Every value is ± one frame interval.',
-      build: () => figDurations(d, shown) },
+      axes: [{ k: 'y', label: 'Hours per observed stage' }], build: () => figDurations(d, shown) },
     { id: 'fig-c', title: 'Phase fractions of the followed cells', time: true, ok: shown.length,
       sub: 'Percent of the followed cells in each phase, per condition (the same cells as the composition figure).',
-      build: (z) => figFractions(d, shown, z) },
+      axes: [AX_TIME, AX_PCT], build: (z) => figFractions(d, shown, z) },
     { id: 'fig-e', title: 'Phase fractions of all cells', time: true, ok: shownAll.length,
       sub: 'Every segmented cell in every frame, summarised per well; lines are the mean across wells and bands the SEM (the Population page, publication style).',
-      build: (z) => figPopPhases(pop, shownAll, z) },
+      axes: [AX_TIME, AX_PCT], build: (z) => figPopPhases(pop, shownAll, z) },
     { id: 'fig-f', title: 'Growth and confluence', time: true, ok: shownAll.length,
       sub: 'Cell number as a fold of the first frame, nuclei per well, and the area covered by cells (phase contrast). Mean ± SEM across wells.',
+      axes: [AX_TIME, { k: 'y0', label: 'Cell number (fold)' }, { k: 'y1', label: 'Nuclei per well' }, { k: 'y2', label: 'Confluence (%)' }],
       build: (z) => figGrowth(pop, shownAll, z) },
     { id: 'fig-d', title: 'Colonies over time', time: S.fig.colStyle !== 'box', ok: hasCol, colonies: true,
       sub: `From the confluence mask: touching cells form one colony; objects under ${minObj} µm² are ignored as debris. ${S.fig.colStyle === 'box' ? 'Box plots: colonies per image (one dot per image) and the area of every colony (a sample of dots shown), at regular time points.' : 'Lines are the mean across wells, bands the SEM.'}`,
+      axes: (S.fig.colStyle === 'box' ? [] : [AX_TIME]).concat([{ k: 'y0', label: 'Colonies per image' }, { k: 'y1', label: `Colony area (µm²)${S.fig.colStyle === 'box' && S.fig.log ? ', log' : ''}` }]),
       build: (z) => (S.fig.colStyle === 'box' ? figColonyBoxes(dist, distConds, S.fig.log) : figColonies(pop, shownAll, z)),
       variants: [
         { name: 'Colonies over time (lines)', build: () => figColonies(pop, shownAll, null) },
         { name: 'Colonies over time (box plots)', build: () => figColonyBoxes(dist, distConds, S.fig.log) },
       ] },
     { id: 'fig-g', title: 'Red versus green at selected time points', ok: true, scatter: true,
+      axes: [{ k: 'x', label: 'Green (PIP-mVenus)' }, { k: 'y', label: 'Red (mCherry-Geminin)' }],
       hint: 'Type a time in hours and press Add (up to 8; each snaps to the nearest image); × removes one, Automatic goes back to four evenly spaced. The Population page uses the same time points. Hover a plot for the share in each gate. Zoom with − / + (or pinch).',
       sub: 'FUCCI-style plots for this experiment, coloured by gate (green G1, red S, yellow G2/M, grey dim), with the gates from step 2. Up to 600 cells per plot.' },
   ];
@@ -517,7 +603,8 @@ function figSection(def) {
     : '<p style="color:#444;padding:20px">No conditions to show. Assign wells on the plate map (step 1) or tick “Show” above.</p>';
   const body = def.scatter ? '<p style="color:#444;padding:20px">Loading…</p>' : def.ok ? ixChart(def.build, { group: def.id }) : empty;
   return `<section class="card" aria-labelledby="${def.id}-h"><div class="card-head"><div><h2 id="${def.id}-h">${def.title}</h2><p>${def.sub}</p></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">${def.colonies ? colonyControls() : ''}${def.scatter ? scatterControls() : ''}${magControls(def.id)}<button class="btn" data-save="${def.id}" data-name="${esc(def.title)}">${ICON.down} Save PNG + SVG</button></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">${def.colonies ? colonyControls() : ''}${def.scatter ? scatterControls() : ''}${def.axes && def.axes.length ? `<button type="button" class="btn sm" data-axes="${def.id}" aria-expanded="${!!S.fig.axOpen[def.id]}">Axes${axSet(def.id) ? ' ·  set' : ''}</button>` : ''}${magControls(def.id)}<button class="btn" data-save="${def.id}" data-name="${esc(def.title)}">${ICON.down} Save PNG + SVG</button></div></div>
+    ${def.axes && S.fig.axOpen[def.id] ? axesEditor(def) : ''}
     <div class="fig-card" id="${def.id}" data-mag="${S.fig.mag[def.id] || 0}">${body}</div>
     <p class="small muted">${def.hint || (def.time ? FIG_HINT_TIME : def.clickable ? FIG_HINT_BOX + ' Click a dot to open that cell.' : FIG_HINT_BOX)}</p></section>`;
 }
@@ -559,7 +646,7 @@ async function buildScatterFigure(d) {
   const sc = await scatterData(tps);
   const any = Object.values(sc)[0];
   const gates = { g: any ? any.gate_green : 0.3, r: any ? any.gate_red : 0.3 };
-  return () => figScatter(sc, scatterConds(d), tps, S.st.experiment.hours, gates);
+  return () => inFig('fig-g', () => figScatter(sc, scatterConds(d), tps, S.st.experiment.hours, gates));
 }
 
 function exName(x) {
@@ -672,6 +759,23 @@ function bindFigures(d) {
     const left = (S.st.experiment.settings.scatter_hours || []).filter((x) => Math.abs(hours[scatterNear(x)] - h) > 1e-6);
     setHours(left);
   });
+  $$('[data-axes]').forEach((b) => b.onclick = () => { S.fig.axOpen[b.dataset.axes] = !S.fig.axOpen[b.dataset.axes]; rerenderFig(b.dataset.axes); });
+  $$('[data-ax-auto]').forEach((b) => b.onclick = () => saveAxes(b.dataset.axAuto, null));
+  $$('.ax-in').forEach((inp) => inp.onchange = () => {
+    const id = inp.dataset.axFig;
+    const spec = {};
+    $$(`.ax-in[data-ax-fig="${id}"]`).forEach((x) => {
+      if (x.value === '') return;
+      const v = parseFloat(x.value);
+      if (!isFinite(v)) return;
+      (spec[x.dataset.ax] = spec[x.dataset.ax] || {})[x.dataset.axK] = v;
+    });
+    for (const [ax, sp] of Object.entries(spec)) {
+      if (sp.min != null && sp.max != null && sp.max <= sp.min) { toast(`“To” must be larger than “from”.`, { bad: true }); return; }
+      if (sp.step != null && sp.step <= 0) { toast('Ticks must be a positive step.', { bad: true }); return; }
+    }
+    saveAxes(id, spec);
+  });
   $$('.fig-card').forEach((c) => applyMag(c.id));
 }
 
@@ -743,6 +847,25 @@ async function exportAll(btn) {
     if (last) toast(`Exported ${n} graphs and figures (PNG + SVG).`, { action: { label: 'Show in Finder', fn: () => api('reveal', { path: last.folder }).catch(fail) }, ms: 15000 });
   } catch (e) { fail(e); }
   if (btn) { btn.disabled = false; btn.innerHTML = label; }
+}
+
+// ---------------------------------------------------------------- axes editor
+function axSet(id) { return Object.keys(((S.st.experiment.settings.fig_axes || {})[id]) || {}).length > 0; }
+
+function axesEditor(def) {
+  const cur = (S.st.experiment.settings.fig_axes || {})[def.id] || {};
+  const inp = (ax, k, ph) => `<input type="number" step="any" class="ax-in" data-ax-fig="${def.id}" data-ax="${ax.k}" data-ax-k="${k}" value="${cur[ax.k] && cur[ax.k][k] != null ? cur[ax.k][k] : ''}" placeholder="${ph}" aria-label="${esc(ax.label)} ${k}">`;
+  return `<div class="axes-ed" role="group" aria-label="Axes of ${esc(def.title)}">
+    ${def.axes.map((ax) => `<div class="ax-row"><span class="ax-l">${esc(ax.label)}</span><span class="small muted">from</span>${inp(ax, 'min', 'auto')}<span class="small muted">to</span>${inp(ax, 'max', 'auto')}<span class="small muted">ticks every</span>${inp(ax, 'step', 'auto')}</div>`).join('')}
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button type="button" class="btn sm ghost" data-ax-auto="${def.id}">All automatic</button><span class="small muted">Empty = automatic. Saved with the experiment and used in “Export all”. ${def.axes.some((a) => a.k === 'x') ? 'Dragging across the time axis still zooms for a closer look; “Reset zoom” returns to these axes.' : ''}</span></div></div>`;
+}
+
+async function saveAxes(id, spec) {
+  const all = { ...(S.st.experiment.settings.fig_axes || {}) };
+  if (spec && Object.keys(spec).length) all[id] = spec; else delete all[id];
+  try { const r = await api('settings', { fig_axes: all }); S.st = r.state; markSaved(); } catch (err) { return fail(err); }
+  delete IX.zoom[id];
+  rerenderFig(id);
 }
 
 // ---------------------------------------------------------------- magnifying a figure

@@ -126,7 +126,7 @@ def segment_chunk(job: dict) -> dict:
         det["frame"].append(np.full(nq, f, dtype=np.int32))
         for key in DET_KEYS[1:]:
             det[key].append(np.asarray(q[key]))
-        c, _, cmask = seg.confluence(phase, nucleus_px, job.get("conf_thr"), nuclei=labels)
+        c, _, cmask = seg.confluence(phase, nucleus_px, job.get("conf_ref"), nuclei=labels, **conf_kw(s))
         conf[f] = c
         reg = phase if phase is not None else np.nan_to_num(r_bg if g_bg is None else (g_bg if r_bg is None else r_bg + g_bg))
         if prev_reg is not None:
@@ -223,20 +223,58 @@ def load_colony_sizes(mask_dir) -> dict:
         return {int(k[1:]): z[k] for k in z.files}
 
 
-def threshold_job(job: dict) -> float | None:
-    """Phase-contrast texture threshold for the confluence mask of one field (first + middle frame)."""
-    thr = []
+def conf_kw(s: dict) -> dict:
+    """Confluence-mask options from the job settings."""
+    c = s.get("conf") or {}
+    return {"sensitivity": c.get("sens", 0.5), "bridge_px": c.get("bridge_px"), "adjust_px": c.get("adjust_px", 0.0)}
+
+
+def threshold_job(job: dict):
+    """Background texture (level, spread) of a field's first phase image (the middle one if the first
+    is missing): used for images too confluent to show any background of their own."""
+    ref = None
     for p in job["paths"]:
         img = io.read_channel(p) if p else None
         if img is not None:
-            thr.append(seg.cell_mask(img, job["nucleus_px"])[1])
+            sd = seg.texture(img, job["nucleus_px"])
+            level, spread, _ = seg.background_stats(sd)
+            ref = (float(level), float(spread))
+            break
     q_ = job.get("progress_q")
     if q_ is not None:
         try:
             q_.put(1)
         except Exception:
             pass
-    return float(np.mean(thr)) if thr else None
+    return ref
+
+
+def remask_job(job: dict) -> dict:
+    """New confluence masks for one chunk of saved masks, from the phase images, keeping the
+    nuclei. job: movie, chunk (npz path), phase {frame: path}, ref, settings, progress_q."""
+    s = job["settings"]
+    path = Path(job["chunk"])
+    with np.load(path) as z:
+        arrays = {k: z[k] for k in z.files}
+    frames = sorted(int(k[1:]) for k in arrays if k.startswith("f"))
+    for f in frames:
+        img = io.read_channel(job["phase"].get(f)) if job["phase"].get(f) else None
+        _, _, cm = seg.confluence(img, s["nucleus_px"], job.get("ref"), nuclei=arrays[f"f{f}"], **conf_kw(s))
+        if cm is not None:
+            arrays[f"c{f}"] = cm.astype(np.uint8)
+        q_ = job.get("progress_q")
+        if q_ is not None:
+            try:
+                q_.put(1)
+            except Exception:
+                pass
+    tmp = path.with_suffix(".tmp")
+    zf = zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1)
+    for k, v in arrays.items():
+        _put(zf, f"{k}.npy", v)
+    zf.close()
+    tmp.replace(path)
+    return {"movie": job["movie"], "frames": frames}
 
 
 def measure_job(job: dict) -> dict:

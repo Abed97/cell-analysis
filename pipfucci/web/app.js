@@ -13,7 +13,7 @@ const S = {
   st: null, view: 'experiment', polling: false, activeCond: null,
   v: { well: null, field: null, frame: 0, layers: new Set(['phase', 'red', 'green', 'bgsub', 'masks']), ids: false, playing: false, sel: null,
        scatter: null, gg: null, gr: null, timer: null, cells: null, ver: 0, fps: 6 },
-  fig: { data: null, ctx: null, colStyle: 'lines', every: null, log: true, mag: {} },
+  fig: { data: null, ctx: null, colStyle: 'lines', every: null, log: true, mag: {}, axOpen: {} },
   pop: { metric: 'count_norm', scond: null, data: null, hidden: new Set(), colStyle: 'lines', dist: null },
   sc: { cond: null, sort: 'division', sel: null, data: null },
 };
@@ -140,12 +140,12 @@ function startPolling(force = false) {
     if (p.running) { setTimeout(tick, 700); return; }
     S.polling = false;
     try { await refreshState(); } catch (e) { /* next poll catches up */ }
-    const what = p.job === 'retrack' ? 'Re-tracking' : p.job === 'measure' ? 'Confluence' : 'Analysis';
+    const what = p.job === 'retrack' ? 'Re-tracking' : p.job === 'measure' || p.job === 'remask' ? 'Confluence' : 'Analysis';
     if (p.error) toast(`${what} failed: ` + p.error, { bad: true });
     else if (p.cancelled) toast('Cancelled.');
-    else if (p.stage === 'Done' && p.job === 'measure') toast('Confluence and colonies updated.');
+    else if (p.stage === 'Done' && (p.job === 'measure' || p.job === 'remask')) toast('Confluence and colonies updated.');
     else if (p.stage === 'Done' && p.job !== 'demo') toast(`${what} finished.`, { action: hasResults() ? { label: 'View results', fn: () => setView('viewer') } : null });
-    if (p.job === 'measure') { S.v.ver++; if (S.view !== 'experiment') render(); }
+    if (p.job === 'measure' || p.job === 'remask') { S.v.ver++; S.pop.dist = null; if (S.view !== 'experiment') render(); }
     if (S.view === 'experiment') render();
   };
   tick();
@@ -534,7 +534,17 @@ function renderViewer() {
             <div class="stat" title="Separate objects in the confluence mask (touching cells form one colony)"><span class="small muted">Colonies</span><span class="v" id="st-col">–</span></div>
             <div class="stat"><span class="small muted">Mean colony area</span><span class="v" id="st-cola" style="font-size:18px">–</span></div>
             <div class="stat"><span class="small muted">Tracks (all)</span><span class="v">${e.n_tracks.toLocaleString()}</span></div></div>
-          <div class="setrow" style="border-top:1px solid #23282D;padding-top:12px"><div class="lbl"><label for="v-minobj">Smallest object counted</label><span>Smaller specks in the confluence mask are debris: drawn with an <span style="color:#FF8C26">orange outline</span> and left out of confluence and colonies.</span></div>
+          <div style="border-top:1px solid #23282D;padding-top:12px;display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><strong style="font-size:14px">Confluence mask</strong><span class="small muted">changes show on the image at once</span></div>
+            <div class="range-row"><label for="v-csens"><span>Sensitivity</span><span class="mono muted" id="v-csens-l">${num(s.conf_sensitivity, 2)}</span></label>
+              <input type="range" id="v-csens" min="0" max="1" step="0.05" value="${s.conf_sensitivity}" aria-describedby="v-csens-h"><span class="small muted" id="v-csens-h">Higher picks up flatter, fainter cells; lower keeps only clearly textured cells (less background).</span></div>
+            <div class="setrow"><div class="lbl"><label for="v-cbridge">Join gaps up to</label><span>Fills the flat space between neighbouring cells so a colony is one area. Empty = half a nucleus.</span></div>
+              <div class="unit-input" style="flex:0 0 140px"><input id="v-cbridge" type="number" min="0" max="100" step="1" placeholder="${num(e.derived.conf_bridge_um)}" value="${s.conf_bridge_um == null ? '' : esc(s.conf_bridge_um)}"><span>µm</span></div></div>
+            <div class="setrow"><div class="lbl"><label for="v-cadj">Grow / shrink edge</label><span>Positive grows the outline outward, negative pulls it in.</span></div>
+              <div class="unit-input" style="flex:0 0 140px"><input id="v-cadj" type="number" min="-20" max="20" step="0.5" value="${esc(s.conf_adjust_um)}"><span>µm</span></div></div>
+            <div id="v-cstale"></div>
+          </div>
+          <div class="setrow"><div class="lbl"><label for="v-minobj">Smallest object counted</label><span>Smaller specks in the confluence mask are debris: drawn with an <span style="color:#FF8C26">orange outline</span> and left out of confluence and colonies.</span></div>
             <div class="unit-input" style="flex:0 0 140px"><input id="v-minobj" type="number" min="0" step="10" value="${esc(s.min_object_um2)}"><span>µm²</span></div></div>
           <p class="small muted">Confluence is the area covered by every cell in phase contrast, coloured or not; turn on “Confluence area” to see it. Colourless cells (neither reporter on, mostly right after division) are followed on phase contrast and drawn as dashed circles under “Cell numbers”.</p>
           <div><div class="kv"><span class="muted">Method</span><span>${s.method === 'cellpose' ? 'Cellpose' : 'Built-in'} on red + green</span></div>
@@ -582,9 +592,37 @@ function renderViewer() {
       if (r.result.action === 'remeasure') startPolling();
     } catch (err) { fail(err); }
   };
+  const confSave = async (patch) => {
+    try {
+      const r = await api('settings', patch);
+      S.st = r.state; markSaved();
+      if (!S.v.layers.has('confluence')) { S.v.layers.add('confluence'); const c = $('input[data-layer=confluence]'); if (c) c.checked = true; }
+      S.v.ver++; loadFrame(); confStale();
+    } catch (err) { fail(err); }
+  };
+  const cs = $('#v-csens');
+  cs.oninput = () => { $('#v-csens-l').textContent = num(+cs.value, 2); };
+  cs.onchange = () => confSave({ conf_sensitivity: +cs.value });
+  $('#v-cbridge').onchange = (ev) => confSave({ conf_bridge_um: ev.target.value === '' ? null : +ev.target.value });
+  $('#v-cadj').onchange = (ev) => confSave({ conf_adjust_um: ev.target.value === '' ? 0 : +ev.target.value });
+  confStale();
   setupGates();
   loadFrame();
   loadScatter();
+}
+
+// The overlay always shows the current confluence settings; the numbers come from the saved
+// masks until they are redrawn for every image.
+function confStale() {
+  const box = $('#v-cstale');
+  if (!box) return;
+  const e = S.st.experiment;
+  if (!e.mask_stale) { box.innerHTML = ''; return; }
+  const n = e.movies.length * e.hours.length;
+  box.innerHTML = `<div class="info" style="margin:0">${ICON.info}<span>The overlay shows these settings; confluence and colony numbers still come from the masks made ${e.settings.conf_sensitivity === 0.5 && e.settings.conf_bridge_um == null && !e.settings.conf_adjust_um ? 'with the earlier method' : 'before the change'}. <button class="btn sm primary" id="v-remask" style="margin-top:6px">Apply to all ${n.toLocaleString()} images</button><br><span class="small muted">Redraws only the confluence (nuclei and tracks are kept); runs in the background.</span></span></div>`;
+  $('#v-remask').onclick = async () => {
+    try { await api('remask', {}); startPolling(); toast('Redrawing confluence for every image…'); } catch (err) { fail(err); }
+  };
 }
 
 // ---------------------------------------------------------------- leaving out blurry images
@@ -999,6 +1037,7 @@ async function renderPopulation() {
   const box = S.pop.colStyle === 'box';
   main.innerHTML = header(3, 'Population', `<div class="legend" role="group" aria-label="Conditions (click to hide or show)">${condLegend(d.conditions)}<span class="muted">Mean ± SEM across wells</span></div>`)
     + excludedNote()
+    + (S.st.experiment.mask_stale ? `<div class="info">${ICON.info}<span>Confluence and colonies come from masks made with ${S.st.experiment.settings.conf_sensitivity === 0.5 && S.st.experiment.settings.conf_bridge_um == null && !S.st.experiment.settings.conf_adjust_um ? 'the earlier confluence method' : 'other confluence settings'}. <button class="link" id="go-conf">Check and redraw them in Segment &amp; gate</button> (nuclei and tracks are kept).</span></div>` : '')
     + (linked.length ? `<div class="info">${ICON.info}<span>Includes ${linked.length} other experiment${linked.length === 1 ? '' : 's'} (${linked.map((l) => esc(l.name)).join(', ')}); conditions with the same name are pooled, wells are the replicates. <button class="link" id="go-fig">Change on the Figures page</button></span></div>` : '')
     + `<p class="small muted">Charts are interactive: hover for values, drag across a time range to zoom (all charts on this page follow), pinch to zoom, double-click to reset. Click a condition above to hide or show it.</p>`
     + `<section class="card" aria-labelledby="frac-h"><div class="card-head"><div><h2 id="frac-h">Phase fractions over time</h2><p>Each well is summarised first; bands are the SEM across wells. Phase calls are smoothed per track; Colourless = neither reporter on (mostly just after division).</p></div></div>
@@ -1034,6 +1073,7 @@ async function renderPopulation() {
   drawSmallScatters(tps);
   bindExport();
   const gf = $('#go-fig'); if (gf) gf.onclick = () => setView('figures');
+  const gc = $('#go-conf'); if (gc) gc.onclick = () => { S.v.layers.add('confluence'); setView('viewer'); };
 }
 
 async function drawColonyBoxes() {

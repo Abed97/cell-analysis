@@ -76,6 +76,38 @@ def _auto_range(img):
     return [float(np.percentile(img, 0.5)), float(np.percentile(img, 99.8))]
 
 
+_refs = _LRU(256)
+
+
+def live_cell_mask(exp, well, field, frame, phase=None):
+    """The confluence mask with the current settings, drawn from the phase image right now (so a
+    change of sensitivity shows at once); the saved mask when there is no phase image."""
+    from . import segment as seg
+    from .pipeline import conf_kw
+
+    s = exp.settings
+    m = masks_for(exp, well, field)
+    nuclei = m.labels(frame) if m is not None else None
+    if phase is None:
+        phase = channel(exp, well, field, frame, "phase")
+    if phase is None:
+        return m.cells(frame) if m is not None else None
+    mv = exp.meta.get("movies", {}).get(f"{well}_{field}", {})
+    first = (mv.get("frames") or [0])[0]
+
+    def ref():
+        img = channel(exp, well, field, first, "phase")
+        if img is None:
+            return None
+        lv, sp, _ = seg.background_stats(seg.texture(img, s.nucleus_px))
+        return (lv, sp)
+
+    r = _refs.get_or((str(exp.folder), well, int(field), round(s.nucleus_px, 2)), ref)
+    sd = {"nucleus_px": s.nucleus_px, "conf": s.mask_params()}
+    mask, _ = seg.cell_mask(phase, s.nucleus_px, r, nuclei=nuclei, **conf_kw(sd))
+    return mask
+
+
 def composite(exp, well: str, field: int, frame: int, layers: set, select_track: str | None = None,
               max_width: int = 1600) -> np.ndarray:
     """Layers: phase, red, green, bgsub (background removed from red/green), masks (nuclei
@@ -99,8 +131,7 @@ def composite(exp, well: str, field: int, frame: int, layers: set, select_track:
         rgb[..., 1] += _stretch(imgs["green"], ranges.get("green") or _auto_range(imgs["green"]))
     rgb = np.clip(rgb, 0, 1)
     if "confluence" in layers and exp.has_results:
-        m = masks_for(exp, well, field)
-        cm = m.cells(frame) if m is not None else None
+        cm = live_cell_mask(exp, well, field, frame, imgs.get("phase"))
         if cm is not None:
             from .pipeline import object_filter
 

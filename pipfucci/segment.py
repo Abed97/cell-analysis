@@ -227,44 +227,82 @@ def quantify(labels: np.ndarray, red: np.ndarray | None, green: np.ndarray | Non
 
 
 # ---------------------------------------------------------------- confluence
-def cell_mask(phase: np.ndarray | None, nucleus_px: float, thr: float | None = None, nuclei: np.ndarray | None = None):
+def texture(phase: np.ndarray, nucleus_px: float) -> np.ndarray:
+    """Local contrast of the phase image at half resolution: the standard deviation of log
+    intensity in a small window. Log makes it independent of brightness and exposure, so the same
+    threshold works when an image is darker or brighter than the others."""
+    img = phase[::2, ::2].astype(np.float32)
+    lg = np.log1p(np.clip(img, 0, None))
+    win = max(3, int(nucleus_px / 3) | 1)
+    m = ndi.uniform_filter(lg, win)
+    m2 = ndi.uniform_filter(lg * lg, win)
+    sd = np.sqrt(np.clip(m2 - m * m, 0, None))
+    return ndi.gaussian_filter(sd, 1.0)
+
+
+def background_stats(sd: np.ndarray) -> tuple[float, float, float]:
+    """Texture of the empty background in this image: (level, spread, share of the image that looks
+    like background). The level is the peak of the histogram; the spread comes from its low side,
+    which cells never reach, so it does not depend on how many cells there are."""
+    v = sd[::2, ::2].ravel()
+    lo, hi = np.percentile(v, [0.5, 99.5])
+    if not hi > lo:
+        return float(lo), 1e-3, 1.0
+    hist, edges = np.histogram(v, bins=256, range=(lo, hi))
+    hist = ndi.gaussian_filter1d(hist.astype(float), 2)
+    i = int(np.argmax(hist))
+    level = 0.5 * float(edges[i] + edges[i + 1])
+    below = v[v <= level]
+    spread = 1.4826 * float(np.median(level - below)) if len(below) > 50 else 0.2 * float(np.std(v))
+    spread = max(spread, 0.1 * level, 1e-4)
+    share = float(np.mean(v < level + 3 * spread))
+    return level, spread, share
+
+
+def cell_mask(phase: np.ndarray | None, nucleus_px: float, ref=None, nuclei: np.ndarray | None = None,
+              sensitivity: float = 0.5, bridge_px: float | None = None, adjust_px: float = 0.0):
     """Area covered by cells (any colour, or none) from phase contrast, at half resolution.
 
-    Local texture finds cell edges and nuclei; closing and hole filling extend that to whole cell
-    bodies; the fluorescent nuclei are added in case a cell is very flat. Returns (mask, thr).
-    """
+    Texture above the image's own background (level + k x spread) marks cells; closing joins the
+    texture of neighbouring cells, holes are filled, and the fluorescent nuclei are added in case a
+    cell is very flat. `ref` is the (level, spread) of the field's first image, used when an image
+    is so confluent that it has no background left to measure. sensitivity 0..1 (higher finds more),
+    bridge_px joins gaps up to that size, adjust_px grows (+) or shrinks (-) the edge.
+    Pixel sizes are full resolution. Returns (mask, (level, spread))."""
     if phase is None:
         if nuclei is None:
-            return None, thr
-        return ndi.binary_dilation(nuclei[::2, ::2] > 0, iterations=max(1, int(nucleus_px / 4))), thr
-    img = phase[::2, ::2].astype(np.float32)
-    win = max(3, int(nucleus_px / 3) | 1)
-    m = ndi.uniform_filter(img, win)
-    m2 = ndi.uniform_filter(img * img, win)
-    sd = np.log1p(np.sqrt(np.clip(m2 - m * m, 0, None)))
-    if thr is None:
-        from skimage.filters import threshold_otsu
-
-        try:
-            thr = float(threshold_otsu(sd))
-        except Exception:
-            thr = float(np.median(sd))
-    mask = sd > thr
-    r = max(1, int(round(nucleus_px / 4)))
-    mask = ndi.binary_closing(mask, structure=_disk(r), iterations=1)
+            return None, ref
+        return ndi.binary_dilation(nuclei[::2, ::2] > 0, iterations=max(1, int(nucleus_px / 4))), ref
+    sd = texture(phase, nucleus_px)
+    level, spread, share = background_stats(sd)
+    if ref is not None and (share < 0.2 or level > ref[0] + 4 * ref[1]):
+        level, spread = ref  # hardly any background visible: use the first image's
+    k = 4.0 + 16.0 * (1.0 - float(np.clip(sensitivity, 0, 1)))  # 0.5 -> 12 x the background spread
+    mask = sd > level + k * spread
+    r = max(1, int(round((bridge_px if bridge_px else nucleus_px / 2) / 2)))  # half resolution
+    p = r + 1  # close on a padded copy so cells touching the image edge keep their edge
+    mask = ndi.binary_closing(np.pad(mask, p, mode="edge"), structure=_disk(r), iterations=1)[p:-p, p:-p]
     mask = ndi.binary_fill_holes(mask)
+    # the texture window reaches past the cell edge by about half its width: take that back
+    win = max(3, int(nucleus_px / 3) | 1)
+    mask = ndi.binary_erosion(mask, structure=_disk(max(1, win // 2)), border_value=1)  # not at the image edge
     mask = ndi.binary_opening(mask, structure=_disk(max(1, r // 2)))
+    a = int(round(adjust_px / 2))
+    if a > 0:
+        mask = ndi.binary_dilation(mask, structure=_disk(a))
+    elif a < 0:
+        mask = ndi.binary_erosion(mask, structure=_disk(-a), border_value=1)
     if nuclei is not None:
         mask |= nuclei[::2, ::2][: mask.shape[0], : mask.shape[1]] > 0
-    return mask, thr
+    return mask, (level, spread)
 
 
-def confluence(phase: np.ndarray | None, nucleus_px: float, thr: float | None = None, nuclei=None):
-    """Fraction of the field covered by cells. Returns (fraction, thr, mask)."""
-    mask, thr = cell_mask(phase, nucleus_px, thr, nuclei)
+def confluence(phase: np.ndarray | None, nucleus_px: float, ref=None, nuclei=None, **kw):
+    """Fraction of the field covered by cells. Returns (fraction, ref, mask)."""
+    mask, ref2 = cell_mask(phase, nucleus_px, ref, nuclei, **kw)
     if mask is None:
-        return np.nan, thr, None
-    return float(mask.mean()), thr, mask
+        return np.nan, ref2, None
+    return float(mask.mean()), ref2, mask
 
 
 # ---------------------------------------------------------------- registration

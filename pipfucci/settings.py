@@ -8,6 +8,8 @@ import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 DEFAULT_COLORS = ["#7AB0FF", "#F59E5B", "#C59BFF", "#5FD4C4", "#F27FB2", "#B8C46A", "#A0A8B2"]
 
 
@@ -28,6 +30,9 @@ class Settings:
     max_gap_h: float = 2.0
     colourless_h: float = 12.0  # follow cells through stretches with neither reporter on, up to this long
     min_object_um2: float = 50.0  # confluence mask: objects smaller than this are debris, not cells
+    conf_sensitivity: float = 0.5  # confluence mask: 0..1, higher finds fainter cells
+    conf_bridge_um: float | None = None  # confluence mask: join gaps up to this size (None: half a nucleus)
+    conf_adjust_um: float = 0.0  # confluence mask: grow (+) or shrink (-) the edge
     bg_radius_um: float | None = None  # top-hat background radius; None = one nucleus diameter
     smoothing_h: float = 1.0
     sensitivity: float = 0.5  # segmentation: 0 = strict, 1 = picks up dim cells
@@ -44,6 +49,7 @@ class Settings:
     # left out of results (blurry): a well "B2", a field "B2_1" (every time point) or one image "B2_1@12" (frame 12)
     excluded: list = field(default_factory=list)
     scatter_hours: list = field(default_factory=list)  # time points of the red-vs-green plots; empty = automatic
+    fig_axes: dict = field(default_factory=dict)  # figure axes set by hand: {figure: {axis: {min, max, step}}}
     styles: dict = field(default_factory=dict)  # figure style per condition name: color, dashed, order, hidden
 
     # ---------- derived ----------
@@ -59,6 +65,16 @@ class Settings:
     def search_radius_px(self) -> float:
         # speed x interval / pixel size, never smaller than one nucleus diameter
         return max(self.max_speed_um_h * self.interval_h / self.pixel_um, 1.0 * self.nucleus_px)
+
+    @property
+    def conf_bridge_px(self) -> float:
+        um = self.conf_bridge_um if self.conf_bridge_um else self.nucleus_um / 2
+        return um / self.pixel_um
+
+    def mask_params(self) -> dict:
+        """What the confluence masks depend on (besides the images)."""
+        return {"sens": round(self.conf_sensitivity, 3), "bridge_px": round(self.conf_bridge_px, 2),
+                "adjust_px": round(self.conf_adjust_um / self.pixel_um, 2), "nucleus_px": round(self.nucleus_px, 2)}
 
     @property
     def bg_radius_px(self) -> float:
@@ -108,6 +124,7 @@ class Settings:
             "bg_radius_px": round(self.bg_radius_px, 1),
             "bg_radius_um": round(self.bg_radius_px * self.pixel_um, 1),
             "min_object_px": round(self.min_object_um2 / self.pixel_um ** 2),
+            "conf_bridge_um": round(self.conf_bridge_px * self.pixel_um, 1),
             "min_object_diam_um": round(2 * math.sqrt(self.min_object_um2 / math.pi), 1),
             "smoothing_frames": self.smoothing_frames,
             "precision_min": self.interval_min,
@@ -162,6 +179,20 @@ class Settings:
         pos("max_gap_h", 0.0, 2.0)
         pos("colourless_h", 0.0, 12.0)
         pos("min_object_um2", 0.0, 50.0)
+        try:
+            self.conf_sensitivity = float(np.clip(float(self.conf_sensitivity), 0.0, 1.0))
+        except (TypeError, ValueError):
+            self.conf_sensitivity = 0.5
+        try:
+            self.conf_adjust_um = float(np.clip(float(self.conf_adjust_um or 0.0), -20.0, 20.0))
+        except (TypeError, ValueError):
+            self.conf_adjust_um = 0.0
+        if self.conf_bridge_um is not None:
+            try:
+                v = float(self.conf_bridge_um)
+                self.conf_bridge_um = v if 0 < v <= 100 else None
+            except (TypeError, ValueError):
+                self.conf_bridge_um = None
         if self.bg_radius_um is not None:
             try:
                 v = float(self.bg_radius_um)
@@ -187,6 +218,27 @@ class Settings:
             if h >= 0 and h not in hs:
                 hs.append(h)
         self.scatter_hours = sorted(hs)[:8]
+        axes = {}
+        for fig, spec in (self.fig_axes.items() if isinstance(self.fig_axes, dict) else []):
+            if not isinstance(spec, dict):
+                continue
+            out = {}
+            for ax, lim in spec.items():
+                if not isinstance(lim, dict):
+                    continue
+                vals = {}
+                for k in ("min", "max", "step"):
+                    try:
+                        v = float(lim.get(k)) if lim.get(k) not in (None, "") else None
+                    except (TypeError, ValueError):
+                        v = None
+                    if v is not None and np.isfinite(v) and not (k == "step" and v <= 0):
+                        vals[k] = v
+                if vals:
+                    out[str(ax)] = vals
+            if out:
+                axes[str(fig)] = out
+        self.fig_axes = axes
         if not isinstance(self.styles, dict):
             self.styles = {}
         if not isinstance(self.linked, list):
