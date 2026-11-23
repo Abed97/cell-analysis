@@ -17,8 +17,10 @@ needed (except to download updates), and images never leave the computer.
    The DMG includes a one-page guide, *How to open Mitosight the first time.pdf*.
 
 Copies installed under an old name keep updating themselves and show the new name and icon in the
-window, menu bar, Dock and notifications; the item in Applications keeps its old name and icon until
-the new DMG is installed over it (or it is renamed in Finder, which is safe). Internally the app bundle, update files and
+window, menu bar, Dock and notifications. From 0.1.16 the copy in Applications (or wherever it was
+installed) also gets the new icon the first time it opens, the same way as pasting an icon in
+Finder's Get Info; it keeps its old name until it is renamed in Finder (safe) or the new DMG is
+installed over it. Internally the app bundle, update files and
 `~/Library/Application Support/PIP-FUCCI` keep the old name so those copies keep updating.
 
 The app isn't registered with Apple (that needs a paid developer account), which is why macOS asks
@@ -80,6 +82,15 @@ well. On the plate map, *Exclude wells (blurry)* does whole wells. Nothing is re
 images become gaps (or, if a well has other fields at that time, the count is scaled to the fields
 that remain) in every chart, figure and Prism table, and are marked `excluded` in the per-cell and
 per-track tables.
+
+**Removing objects by hand:** in Segment & gate, click something that was counted wrongly
+(debris, a bright spot, a double count). *Remove here* (or the **Delete** key) leaves that nucleus
+out of the counts in this image; *Remove in every image* leaves out its whole track. With
+*Confluence area* on, clicking a blue area offers *Don't count* (this image, or every image of the
+field for debris that stays in place), which takes it out of confluence and colonies. Removed
+objects get an orange cross and outline; *Removed by hand in this field* lists them, each with a
+button to count it again. Removals are stored by position, so they survive re-tracking and
+re-running the analysis, and the export README lists them.
 
 **Axes** on every figure can be set by hand (from, to, tick step; empty = automatic), saved with
 the experiment and used by *Export all*. **Figures** can be zoomed with − / + or a pinch (scroll to move around), and the time axis of

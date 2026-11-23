@@ -10,7 +10,7 @@ import pandas as pd
 
 from . import DISPLAY_NAME, analysis
 from .experiment import Experiment, run_info
-from .settings import save_json
+from .settings import _excluded_order, save_json
 
 PH_NAMES = {"G1": "G1", "S": "S", "G2M": "G2-M", "Colourless": "Colourless"}
 
@@ -117,7 +117,7 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
     parents = exp.meta.get("parents", {})
     cells["parent_track"] = cells["track"].map(parents).fillna("")
     ex = exp.excluded_tracks()
-    cells["excluded"] = cells["track"].isin(ex) | exp.frame_excluded_mask(cells)
+    cells["excluded"] = cells["track"].isin(ex) | exp.frame_excluded_mask(cells) | exp.removed_rows(cells)
     cells = cells.rename(columns={"red": "red_mean_bgcorr", "green": "green_mean_bgcorr", "red_med": "red_median_bgcorr",
                                   "green_med": "green_median_bgcorr", "r_n": "red_normalised", "g_n": "green_normalised",
                                   "x_reg": "x_registered", "y_reg": "y_registered", "edge": "at_field_edge"})
@@ -162,5 +162,26 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
             + ", ".join(_ex_name(exp, x) for x in exp.settings.excluded)
             + ".\nTheir cells are still in 'Cells per frame.csv' and 'Tracks.csv', marked excluded = True.\n")
            if exp.settings.excluded else "")
+        + _removed_note(exp)
     )
     return out
+
+
+def _removed_note(exp: Experiment) -> str:
+    """README line on objects removed by hand in the viewer."""
+    rem = exp.settings.removed
+    if not rem:
+        return ""
+    n = {k: sum(1 for r in rem if r["what"] == k) for k in ("object", "track", "patch")}
+    parts = []
+    if n["object"]:
+        parts.append(f"{n['object']} nucle{'us' if n['object'] == 1 else 'i'} in single images")
+    if n["track"]:
+        parts.append(f"{n['track']} whole track{'' if n['track'] == 1 else 's'}")
+    if n["patch"]:
+        parts.append(f"{n['patch']} confluence area{'' if n['patch'] == 1 else 's'}")
+    fields = sorted({r["movie"] for r in rem}, key=_excluded_order)
+    return ("\nRemoved by hand in Segment & gate (not cells, e.g. debris): " + ", ".join(parts)
+            + f", in field{'' if len(fields) == 1 else 's'} " + ", ".join(fields)
+            + ". Removed nuclei are marked excluded = True in 'Cells per frame.csv'; the full list is in"
+            " 'Settings and versions.json' (removed).\n")

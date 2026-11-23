@@ -426,6 +426,67 @@ def need_exp():
     return STATE.exp
 
 
+def hand_remove(b: dict) -> dict:
+    """Take one object out of the counts by hand: a nucleus in this image ("object"), its whole
+    track ("track"), or a confluence area ("patch", in this image or with every=True in all)."""
+    exp = need_results()
+    what = b.get("what")
+    if what not in ("object", "track", "patch"):
+        raise ValueError("Unknown kind of object.")
+    well, field, frame = str(b["well"]), int(b["field"]), int(b["frame"])
+    x, y = float(b["x"]), float(b["y"])
+    movie = f"{well}_{field}"
+    if movie not in exp.meta.get("movies", {}):
+        raise ValueError("No such field.")
+    if what == "patch":
+        if STATE.progress.get("running"):
+            raise ValueError("Wait until the current analysis has finished.")
+        from .pipeline import MovieMasks
+
+        m = MovieMasks(exp.results_dir / "masks" / movie).cells(frame)
+        if m is None:
+            raise ValueError("No confluence mask for this image.")
+        xi, yi = int(x / 2), int(y / 2)
+        win = m[max(0, yi - 4):yi + 5, max(0, xi - 4):xi + 5]
+        if not win.any():
+            raise ValueError("There is no confluence area here. Click inside a blue area.")
+        entry = {"movie": movie, "frame": -1 if b.get("every") else frame, "x": x, "y": y, "what": "patch"}
+    else:
+        lbl = exp.nearest_cell(well, field, frame, x, y)
+        if lbl is None:
+            raise ValueError("There is no nucleus here.")
+        c = exp.cells.loc[lbl]
+        entry = {"movie": movie, "frame": frame, "x": float(c["x"]), "y": float(c["y"]), "what": what}
+    with exp.lock:
+        exp.settings.update({"removed": exp.settings.removed + [entry]})
+        exp.save()
+    if what == "patch":
+        exp.measure_frames(movie, None if entry["frame"] < 0 else [frame])
+    return {"ok": True, "removed": len(exp.settings.removed)}
+
+
+def hand_unremove(b: dict) -> dict:
+    """Count objects again: one removal (index), or every removal in a field (movie)."""
+    exp = need_results()
+    rem = list(exp.settings.removed)
+    if "index" in b:
+        i = int(b["index"])
+        if not 0 <= i < len(rem):
+            raise ValueError("Already put back.")
+        gone = [rem.pop(i)]
+    else:
+        movie = str(b.get("movie", ""))
+        gone = [r for r in rem if r["movie"] == movie]
+        rem = [r for r in rem if r["movie"] != movie]
+    with exp.lock:
+        exp.settings.update({"removed": rem})
+        exp.save()
+    for movie in {r["movie"] for r in gone if r["what"] == "patch"}:
+        frames = {r["frame"] for r in gone if r["what"] == "patch" and r["movie"] == movie}
+        exp.measure_frames(movie, None if -1 in frames else sorted(frames))
+    return {"ok": True, "removed": len(rem)}
+
+
 def need_results():
     exp = need_exp()
     if not exp.has_results:
@@ -645,6 +706,10 @@ class Handler(BaseHTTPRequestHandler):
             if ep == "cancel":
                 STATE.cancel.set()
                 return self._json({"ok": True})
+            if ep == "remove":
+                return self._json(hand_remove(b))
+            if ep == "unremove":
+                return self._json(hand_unremove(b))
             if ep == "track_flag":
                 exp = need_results()
                 kw = {k: b[k] for k in ("excluded", "reviewed") if k in b}

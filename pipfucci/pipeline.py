@@ -177,9 +177,43 @@ def object_filter(mask: np.ndarray, min_px: float):
     return lab, sizes, keep
 
 
-def measure_movie(mask_dir, frames, min_halfpx: float, halfpx_um2: float, progress_q=None) -> dict:
+def drop_patches(lab: np.ndarray, keep: np.ndarray, points) -> np.ndarray:
+    """Stop counting the objects of `lab` under the given points (x, y in the same pixels), each
+    taken out by hand; a point just off an object takes the nearest one within 4 pixels."""
+    if not points:
+        return keep
+    keep = keep.copy()
+    h, w = lab.shape
+    for x, y in points:
+        xi, yi = int(round(x)), int(round(y))
+        if not (0 <= yi < h and 0 <= xi < w):
+            continue
+        lbl = int(lab[yi, xi])
+        if lbl == 0:
+            y0, x0 = max(0, yi - 4), max(0, xi - 4)
+            win = lab[y0:yi + 5, x0:xi + 5]
+            nz = np.argwhere(win > 0)
+            if len(nz):
+                d = ((nz - [yi - y0, xi - x0]) ** 2).sum(axis=1)
+                lbl = int(win[tuple(nz[int(d.argmin())])])
+        if 0 < lbl < len(keep):
+            keep[lbl] = False
+    return keep
+
+
+def patch_points(removed, frame) -> list:
+    """Points (half-resolution pixels) of confluence areas taken out by hand at `frame`."""
+    if not removed:
+        return []
+    return list(removed.get(int(frame), [])) + list(removed.get(-1, []))
+
+
+def measure_movie(mask_dir, frames, min_halfpx: float, halfpx_um2: float, progress_q=None,
+                  removed: dict | None = None, merge: bool = False) -> dict:
     """Confluence, colony number and mean colony area per frame from the stored cell masks
-    (half resolution), ignoring objects smaller than the debris size."""
+    (half resolution), ignoring objects smaller than the debris size and areas taken out by hand
+    (removed: {frame or -1 for every frame: [(x, y) at half resolution]}). merge: update only
+    these frames in the saved colony sizes."""
     masks = MovieMasks(mask_dir)
     out = {"confluence": [], "colonies": [], "colony_area": []}
     each = {}
@@ -189,7 +223,8 @@ def measure_movie(mask_dir, frames, min_halfpx: float, halfpx_um2: float, progre
             for k in out:
                 out[k].append(None)
         else:
-            _, sizes, keep = object_filter(m.astype(bool), min_halfpx)
+            lab, sizes, keep = object_filter(m.astype(bool), min_halfpx)
+            keep = drop_patches(lab, keep, patch_points(removed, f))
             k = int(keep.sum())
             tot = float(sizes[keep].sum())
             out["confluence"].append(tot / m.size)
@@ -201,6 +236,8 @@ def measure_movie(mask_dir, frames, min_halfpx: float, halfpx_um2: float, progre
                 progress_q.put(1)
             except Exception:
                 pass
+    if merge:
+        each = {**{f"f{k}": v for k, v in load_colony_sizes(mask_dir).items()}, **each}
     save_colony_sizes(mask_dir, each)
     return out
 
@@ -280,7 +317,7 @@ def remask_job(job: dict) -> dict:
 def measure_job(job: dict) -> dict:
     s = job["settings"]
     return {"movie": job["movie"], **measure_movie(job["mask_dir"], job["frames"], s["min_object_halfpx"],
-                                                     s["halfpx_um2"], job.get("progress_q"))}
+                                                     s["halfpx_um2"], job.get("progress_q"), job.get("removed"))}
 
 
 def track_job(job: dict) -> dict:
@@ -365,7 +402,8 @@ def track_job(job: dict) -> dict:
     conf = [job["conf"].get(f) for f in frames]
     meas = {"colonies": [None] * len(frames), "colony_area": [None] * len(frames)}
     if has_cells and "min_object_halfpx" in s:
-        meas = measure_movie(job["mask_dir"], frames, s["min_object_halfpx"], s["halfpx_um2"])
+        meas = measure_movie(job["mask_dir"], frames, s["min_object_halfpx"], s["halfpx_um2"],
+                             removed=job.get("removed"))
         conf = [m if m is not None else c for m, c in zip(meas["confluence"], conf)]
     q_ = job.get("progress_q")
     if q_ is not None:

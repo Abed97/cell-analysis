@@ -189,6 +189,8 @@ def main(argv=None) -> int:
     p.add_argument("--whoami", action="store_true", help="print the running executable and exit (update test)")
     p.add_argument("--check-ssl", metavar="URL", nargs="?", const="https://api.github.com/",
                    help="fetch a https address with the app's certificate handling and exit")
+    p.add_argument("--refresh-icon", nargs="?", const="auto", choices=["auto", "force"],
+                   help="give the installed copy the current icon now and exit (build check)")
     p.add_argument("--serve", action="store_true", help="backend only, for in-place updates")
     p.add_argument("--parent-pid", type=int, help="with --serve: exit when this process ends")
     p.add_argument("--ready-file", help="with --serve: write the port here once ready")
@@ -199,6 +201,11 @@ def main(argv=None) -> int:
         return selftest()
     if args.whoami:
         print(sys.executable, flush=True)
+        return 0
+    if args.refresh_icon:
+        from .macos import refresh_installed_icon
+
+        print("icon:", refresh_installed_icon(now=True, force=args.refresh_icon == "force"), flush=True)
         return 0
     if args.check_ssl:
         from .net import check
@@ -246,6 +253,10 @@ def main(argv=None) -> int:
         from . import macos
 
         macos.set_app_icon()
+        try:
+            macos.refresh_installed_icon()
+        except Exception:
+            pass
         webview.start()
         if STATE.restart_requested:
             from .updater import restart_into_newest

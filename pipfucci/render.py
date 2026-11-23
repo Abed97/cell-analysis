@@ -136,7 +136,10 @@ def composite(exp, well: str, field: int, frame: int, layers: set, select_track:
             from .pipeline import object_filter
 
             st = exp.settings
+            from .pipeline import drop_patches, patch_points
+
             lab, sizes, keep = object_filter(cm.astype(bool), st.min_object_um2 / (2 * st.pixel_um) ** 2)
+            keep = drop_patches(lab, keep, patch_points(exp.patch_removals(f"{well}_{int(field)}"), frame))
             kept_h, debris_h = keep[lab], (lab > 0) & ~keep[lab]
 
             def full(a):
@@ -167,9 +170,10 @@ def composite(exp, well: str, field: int, frame: int, layers: set, select_track:
             lut = np.zeros((top + 1, 3), dtype=np.float32)
             sel_lut = np.zeros(top + 1, bool)
             ex = exp.excluded_tracks()
-            for lbl, phs, trk in zip(sub["label"].values, sub[col_name].values, sub["track"].values):
+            gone = exp.removed_rows(sub)
+            for lbl, phs, trk, rm in zip(sub["label"].values, sub[col_name].values, sub["track"].values, gone):
                 if 0 < lbl <= top:
-                    col = PHASE_RGB[3] if trk in ex else PHASE_RGB[int(phs)]
+                    col = PHASE_RGB[3] if trk in ex or rm else PHASE_RGB[int(phs)]
                     lut[lbl] = np.array(col) / 255.0
                     if select_track and trk == select_track:
                         sel_lut[lbl] = True

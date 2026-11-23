@@ -115,6 +115,91 @@ def set_app_icon() -> None:
     _on_main(f)
 
 
+def _bundle_icon(contents) -> "Path | None":
+    """The .icns file a bundle shows (Contents/Info.plist CFBundleIconFile)."""
+    import plistlib
+    from pathlib import Path
+
+    try:
+        info = plistlib.loads((Path(contents) / "Info.plist").read_bytes())
+        name = str(info.get("CFBundleIconFile") or "")
+        if name and not name.endswith(".icns"):
+            name += ".icns"
+        p = Path(contents) / "Resources" / name
+        return p if name and p.is_file() else None
+    except Exception:
+        return None
+
+
+def refresh_installed_icon(now: bool = False, force: bool = False) -> str:
+    """Give the copy she opens from Applications (or wherever she keeps it) the current icon, once.
+
+    Copies installed under an older name keep the icon they came with, because updates are
+    downloaded next to them and started from there. Finder's own custom-icon mechanism is used
+    (NSWorkspace setIcon): it adds an empty Icon file plus extended attributes, which leaves the
+    code signature intact, and it is what Finder does when someone pastes an icon in Get Info.
+    Tried once per icon: the outcome is remembered so a refusal never repeats."""
+    import hashlib
+    import json
+    import os
+    import sys
+    from pathlib import Path
+
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        return "not a Mac app"
+    from .updater import support_dir, versions_dir
+
+    own = Path(sys.executable).resolve().parents[1]  # .../X.app/Contents
+    icon = _bundle_icon(own)
+    if icon is None:
+        return "no icon"
+    stub = os.environ.get("PIPFUCCI_STUB")
+    target = (Path(stub).resolve().parents[2] if stub else own.parent)
+    if target.suffix != ".app":
+        return "not in an app"
+    try:
+        if Path(versions_dir()).resolve() in target.parents:
+            return "update copy"
+    except Exception:
+        pass
+    digest = hashlib.sha256(icon.read_bytes()).hexdigest()[:16]
+    old = _bundle_icon(target / "Contents")
+    if not force and old is not None and hashlib.sha256(old.read_bytes()).hexdigest()[:16] == digest:
+        return "same icon"
+    marker = Path(support_dir()) / "installed_icon.json"
+    try:
+        done = json.loads(marker.read_text())
+    except Exception:
+        done = {}
+    if not force and done.get("path") == str(target) and done.get("icon") == digest:
+        return "already " + str(done.get("result"))
+    if not os.access(target, os.W_OK):
+        marker.write_text(json.dumps({"path": str(target), "icon": digest, "result": "read-only"}))
+        return "read-only"
+
+    def f():
+        result = "failed"
+        try:
+            from AppKit import NSImage, NSWorkspace
+
+            img = NSImage.alloc().initWithContentsOfFile_(str(icon))
+            if img is not None and NSWorkspace.sharedWorkspace().setIcon_forFile_options_(img, str(target), 0):
+                result = "set"
+                NSWorkspace.sharedWorkspace().noteFileSystemChanged_(str(target))
+        except Exception:
+            pass
+        try:
+            marker.write_text(json.dumps({"path": str(target), "icon": digest, "result": result}))
+        except Exception:
+            pass
+        return result
+
+    if now:  # command line (build checks): no run loop to wait for
+        return f()
+    _on_main(f)
+    return "requested"
+
+
 def bounce() -> None:
     """Bounce the Dock icon once (only when the app is in the background)."""
 

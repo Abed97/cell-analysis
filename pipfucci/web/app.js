@@ -511,8 +511,9 @@ function renderViewer() {
             <span style="font-size:14px;color:var(--text)" id="t-label"></span><span id="f-label"></span></div>
         </div>
         <div class="ex-list" id="ex-list"></div>
+        <div id="rm-list"></div>
         <div id="sel-info"></div>
-        <p class="small muted"><span class="kbd">←</span> <span class="kbd">→</span> one frame · <span class="kbd">Shift</span> + arrow five frames · <span class="kbd">Space</span> play or pause · <span class="kbd">X</span> leave this image out (or bring it back) · click a cell to select it and follow it through the movie.</p>
+        <p class="small muted"><span class="kbd">←</span> <span class="kbd">→</span> one frame · <span class="kbd">Shift</span> + arrow five frames · <span class="kbd">Space</span> play or pause · <span class="kbd">X</span> leave this image out (or bring it back) · click a cell to select it and follow it through the movie · <span class="kbd">Delete</span> removes the selected object from the counts (debris, a bright spot) · with <em>Confluence area</em> on, click a blue area to stop counting it.</p>
       </section>
       <div style="flex:2 1 340px;min-width:0;display:flex;flex-direction:column;gap:22px">
         <section class="card tight" aria-labelledby="gate-h">
@@ -557,7 +558,7 @@ function renderViewer() {
       </div></div>`;
 
   $$('[data-useres]').forEach((b) => b.onclick = () => setUseRes(b.dataset.useres));
-  $('#movie').onchange = (ev) => { const [w, f] = ev.target.value.split('|'); S.v.well = w; S.v.field = parseInt(f, 10); S.v.sel = null; stopPlay(); renderViewer(); };
+  $('#movie').onchange = (ev) => { const [w, f] = ev.target.value.split('|'); S.v.well = w; S.v.field = parseInt(f, 10); S.v.sel = null; S.v.spot = null; stopPlay(); renderViewer(); };
   $$('input[data-layer]').forEach((c) => c.onchange = () => {
     const k = c.dataset.layer;
     if (k === 'ids') { S.v.ids = c.checked; drawIds(); if (c.checked) loadCells(); return; }
@@ -749,7 +750,8 @@ function loadFrame() {
   prefetch(f + 1);
   if (S.v.playing) prefetch(f + 2); else prefetch(f - 1);
   updateUseRes();
-  if (S.v.ids || S.v.sel) loadCells(); else { S.v.cells = null; drawIds(); }
+  if (S.v.ids || S.v.sel || S.v.spot || movieRemovals().length) loadCells(); else { S.v.cells = null; S.v.patches = []; drawIds(); }
+  updateRemovedList();
   if (!S.v.playing) {
     api(`stats?well=${S.v.well}&field=${S.v.field}&frame=${f}`).then((st) => {
       const d = $('#st-det');
@@ -768,6 +770,7 @@ async function loadCells() {
     const d = await api(`frame_cells?well=${S.v.well}&field=${S.v.field}&frame=${S.v.frame}`);
     if (want !== `${S.v.well}|${S.v.field}|${S.v.frame}`) return;  // moved on meanwhile
     S.v.cells = d.cells;
+    S.v.patches = d.patches || [];
     S.v.cellsAt = want;
     drawIds();
     selInfo();
@@ -781,8 +784,13 @@ function drawIds() {
   const npx = e.derived.nucleus_px || 20;
   const k = S.v.shape[1] / (svg.clientWidth || S.v.shape[1]);  // image pixels per screen pixel
   const fs = Math.max(npx * 0.7, 12 * k);
-  if (!S.v.cells || (!S.v.ids && !S.v.sel)) { svg.innerHTML = ''; return; }
+  if (!S.v.cells) { svg.innerHTML = ''; return; }
   let out = '';
+  const cross = (x, y, r, col, w) => `<path d="M${x - r} ${y - r}L${x + r} ${y + r}M${x + r} ${y - r}L${x - r} ${y + r}" stroke="${col}" stroke-width="${w}" stroke-linecap="round" fill="none"/>`;
+  const rw = Math.max(2, 2.2 * k).toFixed(1);
+  for (const c of S.v.cells) if (c.removed) out += cross(c.x, c.y, npx * 0.32, '#FF9A3C', rw);
+  for (const p of S.v.patches || []) out += cross(p.x, p.y, npx * 0.45, '#FF9A3C', rw) + `<circle cx="${p.x}" cy="${p.y}" r="${(npx * 0.75).toFixed(1)}" fill="none" stroke="#FF9A3C" stroke-width="${rw}" stroke-dasharray="${(4 * k).toFixed(1)} ${(3 * k).toFixed(1)}"/>`;
+  if (S.v.spot && S.v.spot.frame === S.v.frame) out += `<circle cx="${S.v.spot.x}" cy="${S.v.spot.y}" r="${(npx * 0.5).toFixed(1)}" fill="none" stroke="#FFFFFF" stroke-width="${rw}"/>`;
   for (const c of S.v.cells) {
     const sel = c.key === S.v.sel;
     if (!S.v.ids && !sel) continue;
@@ -804,23 +812,102 @@ async function pickCell(ev) {
   const npx = S.st.experiment.derived.nucleus_px || 20;
   let best = null, bd = (npx * 1.2) ** 2;
   for (const c of S.v.cells) { const d = (c.x - x) ** 2 + (c.y - y) ** 2; if (d < bd) { bd = d; best = c; } }
-  S.v.sel = best ? best.key : null;
+  const nearPatch = (S.v.patches || []).find((p) => (p.x - x) ** 2 + (p.y - y) ** 2 < (npx * 0.9) ** 2);
+  S.v.sel = best && !nearPatch ? best.key : null;
+  S.v.click = { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, frame: S.v.frame };
+  S.v.spot = !S.v.sel && (nearPatch || S.v.layers.has('confluence')) ? { ...S.v.click, patch: nearPatch || null } : null;
   loadFrame();
   selInfo();
+}
+
+function movieRemovals() {
+  const e = S.st && S.st.experiment;
+  if (!e || !e.settings || !e.settings.removed) return [];
+  const mv = `${S.v.well}_${S.v.field}`;
+  return e.settings.removed.map((r, i) => ({ ...r, i })).filter((r) => r.movie === mv);
+}
+
+async function handRemove(what, extra) {
+  const c = (S.v.cells || []).find((x) => x.key === S.v.sel);
+  const at = what === 'patch' ? (S.v.spot || (S.v.click && S.v.click.frame === S.v.frame ? S.v.click : null)) : c;
+  if (!at) return;
+  try {
+    await api('remove', { well: S.v.well, field: S.v.field, frame: S.v.frame, x: at.x, y: at.y, what, ...(extra || {}) });
+    afterRemoval(what === 'patch' ? (extra && extra.every ? 'Confluence area not counted in any image of this field' : 'Confluence area not counted in this image')
+      : what === 'track' ? 'Removed from every image (whole track)' : 'Removed from the counts in this image');
+  } catch (err) { fail(err); }
+}
+
+async function handPutBack(body, message) {
+  try { await api('unremove', body); afterRemoval(message || 'Counted again'); } catch (err) { fail(err); }
+}
+
+async function afterRemoval(message) {
+  S.v.sel = null; S.v.spot = null; S.v.click = null;
+  S.v.ver++;
+  markSaved();
+  await refreshState();
+  loadFrame(); loadScatter(); selInfo();
+  if (message) toast(message);
+}
+
+const RM_LABEL = { object: 'nucleus, this image', track: 'whole track', patch: 'confluence area' };
+
+function updateRemovedList() {
+  const box = $('#rm-list');
+  if (!box) return;
+  const e = S.st.experiment, rs = movieRemovals();
+  if (!rs.length) { box.innerHTML = ''; return; }
+  const n = (k) => rs.filter((r) => r.what === k).length;
+  const parts = [[n('object'), 'nucleus', 'nuclei'], [n('track'), 'track', 'tracks'], [n('patch'), 'confluence area', 'confluence areas']]
+    .filter(([c]) => c).map(([c, a, b]) => `${c} ${c === 1 ? a : b}`);
+  const when = (r) => r.frame < 0 ? 'every image' : `${num(e.hours[r.frame])} h`;
+  box.innerHTML = `<details class="rm-details"><summary><span class="muted">Removed by hand in this field:</span> ${parts.join(' · ')}</summary>
+    <div class="ex-list">${rs.map((r) => `<span class="chip" style="gap:4px"><button type="button" class="link" data-rmgo="${Math.max(0, r.frame)}" title="Go to this image">${when(r)}</button><span class="small muted">${RM_LABEL[r.what]}</span><button type="button" class="x-btn" data-rmback="${r.i}" aria-label="Count again: ${RM_LABEL[r.what]} at ${when(r)}" title="Count again">${ICON.x}</button></span>`).join('')}
+    ${rs.length > 1 ? '<button type="button" class="btn sm ghost" id="rm-all-back">Count all again</button>' : ''}</div></details>`;
+  const det = box.querySelector('details');
+  if (S.v.rmOpen) det.open = true;
+  det.ontoggle = () => { S.v.rmOpen = det.open; };
+  $$('[data-rmgo]').forEach((b) => b.onclick = () => goFrame(+b.dataset.rmgo));
+  $$('[data-rmback]').forEach((b) => b.onclick = () => handPutBack({ index: +b.dataset.rmback }));
+  const all = $('#rm-all-back');
+  if (all) all.onclick = () => handPutBack({ movie: `${S.v.well}_${S.v.field}` }, 'Everything in this field is counted again');
 }
 
 function selInfo() {
   const box = $('#sel-info');
   if (!box) return;
+  if (!S.v.sel && S.v.spot && S.v.spot.frame === S.v.frame) {
+    const p = S.v.spot.patch;
+    box.innerHTML = p
+      ? `<div class="sel-info"><strong>Confluence area</strong><span style="color:#FF9A3C">not counted ${p.every ? 'in any image of this field' : 'in this image'} (removed by hand)</span>
+        <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" id="sp-back">Count it again</button><button class="btn sm" id="sel-clear" aria-label="Clear selection">${ICON.x}</button></span></div>`
+      : `<div class="sel-info"><strong>Confluence area</strong><span class="muted">debris or an empty patch counted as cells?</span>
+        <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" id="sp-rm" title="Leave the blue area under this spot out of confluence and colonies in this image">Don't count, this image</button><button class="btn sm" id="sp-rm-all" title="Leave whatever covers this spot out of confluence and colonies in every image of this field. Only for debris that stays in place: a colony that grows over the spot later is left out too.">Every image</button><button class="btn sm" id="sel-clear" aria-label="Clear selection">${ICON.x}</button></span></div>`;
+    $('#sel-clear').onclick = () => { S.v.spot = null; drawIds(); selInfo(); };
+    const back = $('#sp-back'); if (back) back.onclick = () => handPutBack({ index: p.rid }, 'Confluence area counted again');
+    const r1 = $('#sp-rm'); if (r1) r1.onclick = () => handRemove('patch');
+    const r2 = $('#sp-rm-all'); if (r2) r2.onclick = () => handRemove('patch', { every: true });
+    return;
+  }
   if (!S.v.sel) { box.innerHTML = ''; return; }
   const c = (S.v.cells || []).find((x) => x.key === S.v.sel);
   const [w, f, id] = S.v.sel.split('-');
-  const now = c ? `<span style="color:${PH_TXT[c.call]}">${PH_LABEL[c.call]}${c.interp ? ' (no nucleus signal; position from phase contrast)' : ''}</span>` : '<span class="muted">not in this frame</span>';
+  const now = c ? (c.removed ? `<span style="color:#FF9A3C">removed by hand (${c.removed === 'track' ? 'every image' : 'this image'})</span>`
+    : `<span style="color:${PH_TXT[c.call]}">${PH_LABEL[c.call]}${c.interp ? ' (no nucleus signal; position from phase contrast)' : ''}</span>`) : '<span class="muted">not in this frame</span>';
+  const rm = !c ? '' : c.removed
+    ? `<button class="btn sm" id="sel-back">Count it again</button>`
+    : `<button class="btn sm" id="sel-rm" title="Not a cell (debris, a bright spot, a double count): leave it out of the counts in this image only. Key: Delete">Remove here</button><button class="btn sm" id="sel-rm-all" title="Leave this object out of every image and every result: its whole track, from when it appears until it divides or disappears">Remove in every image</button>`
+      + (S.v.layers.has('confluence') && S.v.click && S.v.click.frame === S.v.frame ? `<button class="btn sm" id="sel-rm-area" title="Leave the blue area you clicked out of confluence and colonies in this image">Don't count its confluence area</button>` : '');
   box.innerHTML = `<div class="sel-info"><strong>Cell ${esc(id)}</strong><span class="muted">${esc(w)} · field ${esc(f)}</span>${now}
-    <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" id="sel-open">Open in Single cells</button><button class="btn sm" id="sel-tree">Family tree</button><button class="btn sm" id="sel-clear" aria-label="Clear selection">${ICON.x}</button></span></div>`;
+    <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">${rm}<button class="btn sm" id="sel-open">Open in Single cells</button><button class="btn sm" id="sel-tree">Family tree</button><button class="btn sm" id="sel-clear" aria-label="Clear selection">${ICON.x}</button></span></div>`;
   $('#sel-clear').onclick = () => { S.v.sel = null; loadFrame(); selInfo(); };
   $('#sel-open').onclick = () => openTrack(S.v.sel, false);
   $('#sel-tree').onclick = () => openTrack(S.v.sel, true);
+  const a = $('#sel-rm'); if (a) a.onclick = () => handRemove('object');
+  const b = $('#sel-rm-all'); if (b) b.onclick = () => handRemove('track');
+  const ar = $('#sel-rm-area'); if (ar) ar.onclick = () => handRemove('patch');
+  const bk = $('#sel-back'); if (bk) bk.onclick = () => handPutBack({ index: c.rid }, c.removed === 'track' ? 'Track counted again' : 'Counted again');
 }
 
 function openTrack(key, tree) {
@@ -1486,6 +1573,9 @@ document.addEventListener('keydown', (ev) => {
   } else if (ev.key === 'x' || ev.key === 'X') {
     ev.preventDefault();
     toggleImage();
+  } else if (ev.key === 'Delete' || ev.key === 'Backspace') {
+    const c = (S.v.cells || []).find((x) => x.key === S.v.sel);
+    if (c && !c.removed) { ev.preventDefault(); handRemove('object'); }
   } else if (ev.key === 'Home') goFrame(0);
   else if (ev.key === 'End') goFrame(S.st.experiment.hours.length - 1);
 });

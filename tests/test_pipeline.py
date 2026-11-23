@@ -415,3 +415,123 @@ def test_worker_count_from_memory(monkeypatch):
     assert E.worker_count() == 9
     mac(4, 3)        # very little memory: one worker
     assert E.worker_count() == 1
+
+
+def test_hand_removal_of_nuclei(exp):
+    from pipfucci import analysis
+    from pipfucci import server
+
+    server.STATE.exp = exp
+    try:
+        c = exp.cells
+        real = c[~c["interp"]] if "interp" in c else c
+        row = real.iloc[len(real) // 2]
+        w, f, fr = row["well"], int(row["field"]), int(row["frame"])
+        before = analysis.detection_stats(exp, w, f, fr)["detected"]
+        n_active = len(analysis._active(exp))
+        # a click a little off the nucleus still finds it
+        server.hand_remove({"well": w, "field": f, "frame": fr, "x": float(row["x"]) + 2, "y": float(row["y"]) - 1,
+                            "what": "object"})
+        assert exp.settings.removed[-1]["what"] == "object"
+        assert analysis.detection_stats(exp, w, f, fr)["detected"] == before - 1
+        assert len(analysis._active(exp)) == n_active - 1
+        fc = analysis.frame_cells(exp, w, f, fr)["cells"]
+        assert sum(1 for x in fc if x["removed"] == "object") == 1
+        # the whole track of another nucleus
+        other = real[(real["well"] == w) & (real["frame"] == fr) & (real["track"] != row["track"])].iloc[0]
+        n_track = int((c["track"] == other["track"]).sum())
+        server.hand_remove({"well": w, "field": int(other["field"]), "frame": fr, "x": float(other["x"]),
+                            "y": float(other["y"]), "what": "track"})
+        assert other["track"] in exp.excluded_tracks()
+        assert len(analysis._active(exp)) == n_active - 1 - n_track
+        # saved with the experiment, and put back one by one or all together
+        assert len(Experiment(exp.folder).settings.removed) == 2
+        server.hand_unremove({"index": 0})
+        assert len(exp.settings.removed) == 1 and other["track"] in exp.excluded_tracks()
+        server.hand_unremove({"movie": f"{w}_{f}"})
+        assert exp.settings.removed == [] and len(analysis._active(exp)) == n_active
+        with pytest.raises(ValueError):
+            server.hand_remove({"well": w, "field": f, "frame": fr, "x": 1e5, "y": 1e5, "what": "object"})
+    finally:
+        exp.settings.update({"removed": []})
+        exp.save()
+
+
+def test_hand_removal_of_confluence_area(exp):
+    from scipy import ndimage as ndi
+
+    from pipfucci import server
+    from pipfucci.pipeline import MovieMasks
+
+    server.STATE.exp = exp
+    try:
+        mv, m = next((k, v) for k, v in exp.meta["movies"].items() if any(n and n > 0 for n in v["colonies"]))
+        i = max(range(len(m["frames"])), key=lambda j: m["colonies"][j] or 0)
+        fr = m["frames"][i]
+        conf0, col0 = m["confluence"][i], m["colonies"][i]
+        mask = MovieMasks(exp.results_dir / "masks" / mv).cells(fr)
+        lab, n = ndi.label(mask, structure=np.ones((3, 3), bool))
+        sizes = np.bincount(lab.ravel())[1:]
+        big = int(np.argmax(sizes)) + 1
+        yh, xh = np.argwhere(lab == big)[0]
+        w, f = mv.rsplit("_", 1)
+        server.hand_remove({"well": w, "field": int(f), "frame": fr, "x": 2.0 * xh, "y": 2.0 * yh, "what": "patch"})
+        m = exp.meta["movies"][mv]
+        assert m["colonies"][i] == col0 - 1 and m["confluence"][i] < conf0
+        # other images of the field are untouched; saved results follow
+        meta = Experiment(exp.folder).meta["movies"][mv]
+        assert meta["colonies"][i] == col0 - 1
+        server.hand_unremove({"index": 0})
+        m = exp.meta["movies"][mv]
+        assert m["colonies"][i] == col0 and abs(m["confluence"][i] - conf0) < 1e-9
+        with pytest.raises(ValueError):  # nothing to take out in an empty corner
+            empty = np.argwhere(ndi.binary_dilation(mask, iterations=6) == 0)
+            if len(empty):
+                yh, xh = empty[0]
+                server.hand_remove({"well": w, "field": int(f), "frame": fr, "x": 2.0 * xh, "y": 2.0 * yh,
+                                    "what": "patch"})
+            else:
+                raise ValueError("fully covered")
+    finally:
+        exp.settings.update({"removed": []})
+        exp.save()
+
+
+def test_removed_setting_is_validated():
+    from pipfucci.settings import Settings
+
+    s = Settings()
+    s.update({"removed": [
+        {"movie": "B2_1", "frame": 3, "x": 10, "y": 20, "what": "object"},
+        {"movie": "B2_1", "frame": 3, "x": 10, "y": 20, "what": "object"},  # duplicate
+        {"movie": "B2_1", "frame": -1, "x": 10, "y": 20, "what": "patch"},
+        {"movie": "B2_1", "frame": -1, "x": 10, "y": 20, "what": "object"},  # every image: patches only
+        {"movie": "B2", "frame": 1, "x": 1, "y": 1, "what": "object"},       # no field
+        {"movie": "B2_1", "frame": 1, "x": float("nan"), "y": 1},
+        {"movie": "B2_1", "frame": 1, "x": 1, "y": 1, "what": "cell"},
+        "junk",
+    ]})
+    assert [(r["frame"], r["what"]) for r in s.removed] == [(3, "object"), (-1, "patch")]
+
+
+def test_hand_removal_survives_retracking(exp):
+    from pipfucci import analysis
+    from pipfucci import server
+
+    server.STATE.exp = exp
+    try:
+        c = exp.cells
+        real = c[~c["interp"]] if "interp" in c else c
+        row = real.iloc[len(real) // 3]
+        w, f, fr = row["well"], int(row["field"]), int(row["frame"])
+        server.hand_remove({"well": w, "field": f, "frame": fr, "x": float(row["x"]), "y": float(row["y"]),
+                            "what": "object"})
+        before = analysis.detection_stats(exp, w, f, fr)["detected"]
+        exp.retrack()
+        assert analysis.detection_stats(exp, w, f, fr)["detected"] == before
+        fc = analysis.frame_cells(exp, w, f, fr)["cells"]
+        hit = [x for x in fc if x["removed"] == "object"]
+        assert len(hit) == 1 and abs(hit[0]["x"] - row["x"]) < 1 and abs(hit[0]["y"] - row["y"]) < 1
+    finally:
+        exp.settings.update({"removed": []})
+        exp.save()

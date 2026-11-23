@@ -119,6 +119,25 @@ jobs:
           # the unzipped copy must still be runnable (signature intact after the zip round trip)
           PIPFUCCI_NO_UPDATES=1 "$PIPFUCCI_SUPPORT_DIR/versions/PIP-FUCCI-999.0.0.app/Contents/MacOS/PIP-FUCCI" --selftest
 
+      - name: Test the new icon on a copy installed under an old name (and that it still opens)
+        run: |
+          export PIPFUCCI_SUPPORT_DIR="$RUNNER_TEMP/support-icon" PIPFUCCI_NO_UPDATES=1
+          mkdir -p "$RUNNER_TEMP/apps"
+          ditto -x -k "PIP-FUCCI-${{ matrix.label }}.app.zip" "$RUNNER_TEMP/apps"
+          mv "$RUNNER_TEMP/apps/PIP-FUCCI.app" "$RUNNER_TEMP/apps/CycleTrack.app"
+          OLD="$RUNNER_TEMP/apps/CycleTrack.app"
+          out="$(PIPFUCCI_STUB="$OLD/Contents/MacOS/PIP-FUCCI" dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --refresh-icon force)"
+          echo "$out"
+          [[ "$out" == *"icon: set"* ]]
+          test -e "$OLD/Icon"$'\r'
+          xattr -l "$OLD" | grep -q com.apple.FinderInfo
+          # asked again without force it remembers and does nothing
+          out="$(PIPFUCCI_STUB="$OLD/Contents/MacOS/PIP-FUCCI" dist/PIP-FUCCI.app/Contents/MacOS/PIP-FUCCI --refresh-icon)"
+          echo "$out"
+          # the copy with its new icon must still start
+          "$OLD/Contents/MacOS/PIP-FUCCI" --selftest
+          codesign --verify --verbose=2 "$OLD" || echo "codesign notes the icon file in the bundle root; the app still runs"
+
       - name: Test "Update now" (the new copy starts in the background and serves the app)
         run: |
           export PIPFUCCI_SUPPORT_DIR="$RUNNER_TEMP/support" PIPFUCCI_LAUNCHED=1

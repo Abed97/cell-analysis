@@ -32,6 +32,9 @@ def _active(exp: Experiment) -> pd.DataFrame:
     fm = exp.frame_excluded_mask(c)
     if fm.any():
         c = c[~fm]
+    rm = exp.removed_rows(c)
+    if rm.any():
+        c = c[~rm]
     return c
 
 
@@ -155,8 +158,10 @@ def population(exp: Experiment) -> dict:
 def scatter(exp: Experiment, frame: int, well: str | None = None, field: int | None = None,
             condition: str | None = None, max_points: int = 3000) -> dict:
     if well:  # the viewer's own field: shown even when the field is excluded from results
-        flagged = {k for k, v in exp.flags.items() if v.get("excluded")}
-        c = _real(exp.cells[~exp.cells["track"].isin(flagged)] if flagged else exp.cells)
+        flagged = {k for k, v in exp.flags.items() if v.get("excluded")} | exp.removal_hits()[1]
+        c = exp.cells[~exp.cells["track"].isin(flagged)] if flagged else exp.cells
+        rm = exp.removed_rows(c)
+        c = _real(c[~rm] if rm.any() else c)
     else:
         c = _real(_active(exp))
     sub = c[c["frame"] == frame]
@@ -346,11 +351,20 @@ def frame_cells(exp: Experiment, well: str, field: int, frame: int) -> dict:
     c = exp.cells
     sub = c[(c["well"] == well) & (c["field"] == field) & (c["frame"] == frame)]
     ex = exp.excluded_tracks()
+    rows, tracks, which = exp.removal_hits()
     col = _call_col(sub)
-    return {"cells": [{"key": k, "id": int(t), "x": round(float(x), 1), "y": round(float(y), 1), "call": int(p),
-                       "interp": bool(i), "excluded": k in ex}
-                      for k, t, x, y, p, i in zip(sub["track"], sub["tid"], sub["x"], sub["y"], sub[col],
-                                                  sub["interp"] if "interp" in sub else [False] * len(sub))]}
+    cells = []
+    for lbl, k, t, x, y, p, i in zip(sub.index, sub["track"], sub["tid"], sub["x"], sub["y"], sub[col],
+                                     sub["interp"] if "interp" in sub else [False] * len(sub)):
+        rm = "object" if lbl in rows else "track" if k in tracks else None
+        cells.append({"key": k, "id": int(t), "x": round(float(x), 1), "y": round(float(y), 1), "call": int(p),
+                      "interp": bool(i), "excluded": k in ex, "removed": rm,
+                      "rid": which.get(lbl if rm == "object" else k, -1) if rm else -1})
+    mv = f"{well}_{int(field)}"
+    patches = [{"x": r["x"], "y": r["y"], "every": r["frame"] < 0, "rid": i}
+               for i, r in enumerate(exp.settings.removed)
+               if r["what"] == "patch" and r["movie"] == mv and r["frame"] in (-1, int(frame))]
+    return {"cells": cells, "patches": patches}
 
 
 def lineage(exp: Experiment, key: str) -> dict:
@@ -433,6 +447,10 @@ def cohort_paths(exp: Experiment, wells: list[str], min_frames: int = 3) -> list
 def detection_stats(exp: Experiment, well: str, field: int, frame: int) -> dict:
     c = exp.cells
     sub = c[(c["well"] == well) & (c["field"] == field) & (c["frame"] == frame)]
+    _, tracks, _ = exp.removal_hits()
+    gone = exp.removed_rows(sub) | sub["track"].isin(tracks).values  # removed by hand: not counted
+    n_removed = int(gone.sum())
+    sub = sub[~gone]
     n_interp = int(sub["interp"].sum()) if "interp" in sub else 0
     sub = sub[~sub["interp"]] if "interp" in sub else sub
     conf = ncol = acol = None
@@ -442,6 +460,6 @@ def detection_stats(exp: Experiment, well: str, field: int, frame: int) -> dict:
         conf = m["confluence"][i]
         ncol = (m.get("colonies") or [None] * (i + 1))[i]
         acol = (m.get("colony_area") or [None] * (i + 1))[i]
-    return {"detected": int(len(sub)), "colourless": n_interp,
+    return {"detected": int(len(sub)), "colourless": n_interp, "removed": n_removed,
             "confluence": None if conf is None else round(conf * 100, 1),
             "colonies": ncol, "colony_area": None if acol is None else round(acol)}

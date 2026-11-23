@@ -13,6 +13,36 @@ import numpy as np
 DEFAULT_COLORS = ["#7AB0FF", "#F59E5B", "#C59BFF", "#5FD4C4", "#F27FB2", "#B8C46A", "#A0A8B2"]
 
 
+REMOVED_KINDS = ("object", "track", "patch")
+MAX_REMOVED = 20000
+
+
+def clean_removed(items) -> list:
+    """Valid, de-duplicated hand removals, in the order they were made."""
+    out, seen = [], set()
+    for r in items if isinstance(items, list) else []:
+        if not isinstance(r, dict):
+            continue
+        try:
+            mv = str(r["movie"])
+            w, _, f = mv.rpartition("_")
+            fr, x, y = int(r["frame"]), float(r["x"]), float(r["y"])
+            what = str(r.get("what", "object"))
+        except Exception:
+            continue
+        if not (w and f.isdigit() and fr >= -1 and what in REMOVED_KINDS
+                and math.isfinite(x) and math.isfinite(y) and x >= 0 and y >= 0):
+            continue
+        if what != "patch" and fr < 0:
+            continue
+        e = {"movie": mv, "frame": fr, "x": round(x, 1), "y": round(y, 1), "what": what}
+        k = (mv, fr, e["x"], e["y"], what)
+        if k not in seen:
+            seen.add(k)
+            out.append(e)
+    return out[-MAX_REMOVED:]
+
+
 def _excluded_order(x: str):
     """B2 < B2_1 < B2_1@3 < B2_1@12 < B10."""
     mv, _, fr = x.partition("@")
@@ -48,6 +78,9 @@ class Settings:
     linked: list = field(default_factory=list)  # other analysed experiment folders shown alongside this one
     # left out of results (blurry): a well "B2", a field "B2_1" (every time point) or one image "B2_1@12" (frame 12)
     excluded: list = field(default_factory=list)
+    # removed by hand in the viewer, by position (so they survive a re-run or re-tracking):
+    # {"movie": "B2_1", "frame": 12 (-1 = every image), "x": px, "y": px, "what": object|track|patch}
+    removed: list = field(default_factory=list)
     scatter_hours: list = field(default_factory=list)  # time points of the red-vs-green plots; empty = automatic
     fig_axes: dict = field(default_factory=dict)  # figure axes set by hand: {figure: {axis: {min, max, step}}}
     styles: dict = field(default_factory=dict)  # figure style per condition name: color, dashed, order, hidden
@@ -207,6 +240,7 @@ class Settings:
         if not isinstance(self.excluded, list):
             self.excluded = []
         self.excluded = sorted({str(x) for x in self.excluded if isinstance(x, str) and x}, key=_excluded_order)
+        self.removed = clean_removed(self.removed)
         if not isinstance(self.scatter_hours, list):
             self.scatter_hours = []
         hs = []

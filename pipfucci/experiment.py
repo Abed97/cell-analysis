@@ -450,7 +450,7 @@ class Experiment:
                     track_jobs.append({"movie": mv, "frames": info["frames"], "det": det, "steps": steps,
                                        "conf": conf, "shape": parts[0]["shape"], "settings": sd,
                                        "mask_dir": info["mask_dir"], "paths": info["paths"],
-                                       "ranges": parts[0]["ranges"]})
+                                       "ranges": parts[0]["ranges"], "removed": self.patch_removals(movie_key(*mv))})
                 state["movies"] = 0
                 n_tr = max(1, len(track_jobs))
 
@@ -540,7 +540,7 @@ class Experiment:
         cancel = cancel or threading.Event()
         with self.lock:
             sd = self.derived_numbers()
-            jobs = [{"movie": k, "frames": m["frames"], "settings": sd,
+            jobs = [{"movie": k, "frames": m["frames"], "settings": sd, "removed": self.patch_removals(k),
                      "mask_dir": str(self.results_dir / "masks" / k)} for k, m in self.meta.get("movies", {}).items()]
         total = sum(len(j["frames"]) for j in jobs)
         state = {"done": 0}
@@ -639,7 +639,8 @@ class Experiment:
                 jobs.append({"movie": (well, int(fld)), "frames": frames, "det": det, "steps": steps,
                              "conf": dict(zip(frames, m["confluence"])), "shape": m["shape"], "settings": sd,
                              "mask_dir": str(self.results_dir / "masks" / movie_key(*mv)),
-                             "paths": {f: dict(mf.files[mv][f]) for f in mf.frames(mv)}, "ranges": m["ranges"]})
+                             "paths": {f: dict(mf.files[mv][f]) for f in mf.frames(mv)}, "ranges": m["ranges"],
+                             "removed": self.patch_removals(movie_key(*mv))})
             results = [track_job(j) for j in jobs]
             keep_meta = self.meta
             self._assemble(results)
@@ -811,10 +812,106 @@ class Experiment:
         return out
 
     def excluded_tracks(self) -> set:
-        """Tracks left out of results: flagged one by one, or in an excluded well or field."""
+        """Tracks left out of results: flagged one by one, removed by hand in the viewer, or in an
+        excluded well or field."""
         flagged = {k for k, v in self.flags.items() if v.get("excluded")}
         ex = self.tracks_in_excluded()
-        return flagged | ex if ex else flagged
+        _, rm_tracks, _ = self.removal_hits()
+        return flagged | ex | rm_tracks
+
+    # ------------------------------------------------------------ removed by hand
+    def _cell_groups(self) -> dict:
+        """Row labels of the cells table per image: {(well, field, frame): index array}."""
+        c = self.cells
+        key = (id(c), len(c) if c is not None else 0)
+        if getattr(self, "_grp_key", None) == key:
+            return self._grp
+        grp = {}
+        if c is not None and len(c):
+            for k, idx in c.groupby(["well", "field", "frame"], sort=False).indices.items():
+                grp[(str(k[0]), int(k[1]), int(k[2]))] = c.index.values[idx]
+        self._grp_key, self._grp = key, grp
+        return grp
+
+    def nearest_cell(self, well: str, field: int, frame: int, x: float, y: float, radius: float | None = None):
+        """Row label of the nucleus nearest (x, y) in one image, within `radius` px (default
+        0.8 nucleus diameters), or None."""
+        rows = self._cell_groups().get((well, int(field), int(frame)))
+        if rows is None or not len(rows):
+            return None
+        c = self.cells.loc[rows]
+        d2 = (c["x"].values - x) ** 2 + (c["y"].values - y) ** 2
+        i = int(np.argmin(d2))
+        r = radius if radius is not None else 0.8 * self.settings.nucleus_px
+        return rows[i] if d2[i] <= r * r else None
+
+    def removal_hits(self):
+        """What the hand removals hit now: (row labels of single nuclei, track keys of whole tracks,
+        {row label or track key: index in settings.removed}). Matched by position, so they follow
+        the cells through a re-run or re-tracking."""
+        rem = self.settings.removed
+        c = self.cells
+        key = (repr(rem), id(c), len(c) if c is not None else 0, round(self.settings.nucleus_px, 3))
+        if getattr(self, "_rm_key", None) == key:
+            return self._rm_val
+        rows, tracks, which = set(), set(), {}
+        if rem and c is not None and len(c):
+            for i, r in enumerate(rem):
+                if r["what"] == "patch":
+                    continue
+                w, _, f = r["movie"].rpartition("_")
+                lbl = self.nearest_cell(w, int(f), r["frame"], r["x"], r["y"])
+                if lbl is None:
+                    continue
+                if r["what"] == "track":
+                    t = c.at[lbl, "track"]
+                    tracks.add(t)
+                    which[t] = i
+                else:
+                    rows.add(lbl)
+                    which[lbl] = i
+        self._rm_key, self._rm_val = key, (rows, tracks, which)
+        return self._rm_val
+
+    def removed_rows(self, cells) -> np.ndarray:
+        """Rows of `cells` (rows of self.cells) whose nucleus was removed by hand in that image."""
+        rows, _, _ = self.removal_hits()
+        if not rows or cells is None or not len(cells):
+            return np.zeros(0 if cells is None else len(cells), dtype=bool)
+        return cells.index.isin(list(rows))
+
+    def patch_removals(self, movie: str) -> dict:
+        """Confluence areas taken out by hand in one field: {frame or -1: [(x, y) half resolution]}."""
+        out: dict = {}
+        for r in self.settings.removed:
+            if r["what"] == "patch" and r["movie"] == movie:
+                out.setdefault(int(r["frame"]), []).append((r["x"] / 2.0, r["y"] / 2.0))
+        return out
+
+    def measure_frames(self, movie: str, frames=None) -> None:
+        """Confluence and colonies again for some images of one field (after a hand removal)."""
+        from .pipeline import measure_movie
+
+        with self.lock:
+            m = (self.meta or {}).get("movies", {}).get(movie)
+            if m is None:
+                return
+            sd = self.derived_numbers()
+            mframes = list(m["frames"])
+            todo = [f for f in (mframes if frames is None else frames) if f in mframes]
+            if not todo:
+                return
+            r = measure_movie(self.results_dir / "masks" / movie, todo, sd["min_object_halfpx"], sd["halfpx_um2"],
+                              removed=self.patch_removals(movie), merge=True)
+            n = len(mframes)
+            for k in ("confluence", "colonies", "colony_area"):
+                arr = list(m.get(k) or [None] * n)
+                arr += [None] * (n - len(arr))
+                for f, v in zip(todo, r[k]):
+                    if v is not None or k != "confluence":
+                        arr[mframes.index(f)] = v
+                m[k] = arr
+            save_json(self.results_dir / "meta.json", self.meta)
 
 
 def run_info(exp: Experiment) -> dict:
