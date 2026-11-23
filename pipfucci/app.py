@@ -243,6 +243,9 @@ def main(argv=None) -> int:
         import threading
 
         threading.Thread(target=watch_jobs, args=(window, port), daemon=True, name="watch-jobs").start()
+        from . import macos
+
+        macos.set_app_icon()
         webview.start()
         if STATE.restart_requested:
             from .updater import restart_into_newest

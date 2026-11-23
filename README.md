@@ -1,7 +1,7 @@
-# CycleTrack
+# Mitosight
 
 A Mac app for PIP-FUCCI time-lapse experiments from the Incucyte (it was called PIP-FUCCI until
-version 0.1.7). It segments nuclei, tracks them through divisions, calls G1 / S / G2-M from the
+version 0.1.7 and CycleTrack until 0.1.14). It segments nuclei, tracks them through divisions, calls G1 / S / G2-M from the
 red and green reporters, measures confluence and colonies, and produces population, single-cell
 and publication-ready results. Everything runs on the Mac: no account, no sign-in, no internet
 needed (except to download updates), and images never leave the computer.
@@ -9,16 +9,16 @@ needed (except to download updates), and images never leave the computer.
 ## Install
 
 1. Download the DMG for your Mac (Apple menu > About This Mac shows *Apple M…* or *Intel*):
-   - Apple silicon: [CycleTrack-AppleSilicon.dmg](https://github.com/Abed97/cell-analysis/releases/latest/download/CycleTrack-AppleSilicon.dmg)
-   - Intel: [CycleTrack-Intel.dmg](https://github.com/Abed97/cell-analysis/releases/latest/download/CycleTrack-Intel.dmg)
-2. Open it and drag **CycleTrack** onto **Applications**.
-3. First time only: double-click CycleTrack and click **Done** on the warning. Then open
+   - Apple silicon: [Mitosight-AppleSilicon.dmg](https://github.com/Abed97/cell-analysis/releases/latest/download/Mitosight-AppleSilicon.dmg)
+   - Intel: [Mitosight-Intel.dmg](https://github.com/Abed97/cell-analysis/releases/latest/download/Mitosight-Intel.dmg)
+2. Open it and drag **Mitosight** onto **Applications**.
+3. First time only: double-click Mitosight and click **Done** on the warning. Then open
    **System Settings › Privacy & Security**, scroll down, click **Open Anyway**, and confirm.
-   The DMG includes a one-page guide, *How to open CycleTrack the first time.pdf*.
+   The DMG includes a one-page guide, *How to open Mitosight the first time.pdf*.
 
-Copies installed under the old name keep updating themselves and show the new name in the window,
-menu bar and notifications; the icon in Applications keeps the old name unless it is renamed in
-Finder (safe to do). Internally the app bundle, update files and
+Copies installed under an old name keep updating themselves and show the new name and icon in the
+window, menu bar, Dock and notifications; the item in Applications keeps its old name and icon until
+the new DMG is installed over it (or it is renamed in Finder, which is safe). Internally the app bundle, update files and
 `~/Library/Application Support/PIP-FUCCI` keep the old name so those copies keep updating.
 
 The app isn't registered with Apple (that needs a paid developer account), which is why macOS asks

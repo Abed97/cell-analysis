@@ -96,6 +96,25 @@ def set_badge(label: str | None) -> None:
     _on_main(f)
 
 
+def set_app_icon() -> None:
+    """Show the current icon in the Dock and app switcher, also when the copy in Applications was
+    installed under an older name with an older icon (it hands over to the downloaded version)."""
+    from pathlib import Path
+
+    path = Path(__file__).parent / "web" / "icon.png"
+    if not path.is_file():
+        return
+
+    def f():
+        from AppKit import NSApplication, NSImage
+
+        img = NSImage.alloc().initWithContentsOfFile_(str(path))
+        if img is not None:
+            NSApplication.sharedApplication().setApplicationIconImage_(img)
+
+    _on_main(f)
+
+
 def bounce() -> None:
     """Bounce the Dock icon once (only when the app is in the background)."""
 
@@ -126,7 +145,7 @@ def _center():
 
 
 def request_notifications() -> None:
-    """Asks once ("CycleTrack would like to send notifications"); called when the first analysis
+    """Asks once ("Mitosight would like to send notifications"); called when the first analysis
     starts, so the question comes at a moment that makes sense."""
     if not MAC or _notify_state["asked"]:
         return
@@ -184,7 +203,7 @@ def notify(title: str, body: str) -> None:
                 status = int(settings.authorizationStatus())
             except Exception:
                 status = -1
-            if status == 1:  # she turned CycleTrack's notifications off in System Settings: respect it
+            if status == 1:  # she turned Mitosight's notifications off in System Settings: respect it
                 return
             if status in (2, 3, 4):  # authorized, provisional, ephemeral
                 try:

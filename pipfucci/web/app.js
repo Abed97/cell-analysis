@@ -1554,7 +1554,7 @@ async function refreshUpdate() {
   const pill = document.getElementById('upd-pill');
   const banner = document.getElementById('banner');
   const ver = S.st ? S.st.version : '';
-  if (u.just_updated) toast(`CycleTrack is now version ${u.just_updated}.`);
+  if (u.just_updated) toast(`Mitosight is now version ${u.just_updated}.`);
   const busy = analysisRunning();
   if (!u.enabled) {  // running from source: just say a new release exists
     pill.innerHTML = u.available ? `<button class="pill ready" id="upd-btn">Download version ${esc(u.latest)}</button>` : `<span class="pill">Version <span class="mono">${esc(ver)}</span></span>`;
@@ -1564,7 +1564,7 @@ async function refreshUpdate() {
     pill.innerHTML = `<button class="pill ready" id="upd-btn" ${busy ? 'disabled' : ''} title="${busy ? 'Available when the analysis has finished' : 'Switches to the new version in a few seconds; your experiment stays open'}">${ICON.down} Update now · ${esc(u.ready_version)}</button>`;
     $('#upd-btn').onclick = updateNow;
     if (S.bannerHidden !== u.ready_version && !S.prefs.auto_install) {
-      banner.innerHTML = `<div class="banner"><div class="txt">${ICON.info}<span><strong>Version ${esc(u.ready_version)} of CycleTrack is ready.</strong> <span class="muted">${busy ? 'You can update when the analysis finishes.' : 'Takes a few seconds; your experiment stays open.'}</span></span></div>
+      banner.innerHTML = `<div class="banner"><div class="txt">${ICON.info}<span><strong>Version ${esc(u.ready_version)} of Mitosight is ready.</strong> <span class="muted">${busy ? 'You can update when the analysis finishes.' : 'Takes a few seconds; your experiment stays open.'}</span></span></div>
         <div style="display:flex;gap:8px"><button class="btn sm" id="upd-later">Later</button><button class="btn sm primary" id="upd-now" ${busy ? 'disabled' : ''} style="min-height:32px">Update now</button></div></div>`;
       $('#upd-now').onclick = updateNow;
       $('#upd-later').onclick = () => { S.bannerHidden = u.ready_version; banner.innerHTML = ''; };
@@ -1618,7 +1618,7 @@ async function openSettings() {
       <label class="toggle"><input type="checkbox" id="p-install" ${p.auto_install ? 'checked' : ''}><span class="t"><strong>Install updates automatically</strong><span>Switches to a downloaded version the next time the app is opened, or after a minute without use when no analysis is running. Your experiment stays open. When off, use the blue “Update now” button at the top right.</span></span></label>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:10px;border-top:1px solid #23282D"><button class="btn sm" id="p-now">Check now</button><span class="small muted" id="set-status"></span></div></div>
     <div><h3>Notifications</h3>
-      <label class="toggle"><input type="checkbox" id="p-notify" ${p.notify !== false ? 'checked' : ''}><span class="t"><strong>Notify me when an analysis finishes</strong><span>A macOS notification and a bounce of the Dock icon. While it runs, the Dock icon shows the progress. The first time, macOS asks whether CycleTrack may send notifications: click Allow.</span></span></label></div>
+      <label class="toggle"><input type="checkbox" id="p-notify" ${p.notify !== false ? 'checked' : ''}><span class="t"><strong>Notify me when an analysis finishes</strong><span>A macOS notification and a bounce of the Dock icon. While it runs, the Dock icon shows the progress. The first time, macOS asks whether Mitosight may send notifications: click Allow.</span></span></label></div>
     <div><h3>Processing</h3>
       <div class="setrow"><div class="lbl"><label for="p-workers">Processor cores for analysis</label><span>Images are segmented in parallel, each core using about 0.3 GB of memory. Auto uses all but one core, keeping 3 GB free for macOS and other apps. This Mac has ${p.cpus} core${p.cpus === 1 ? '' : 's'}${p.mem_gb ? ` and ${p.mem_gb} GB of memory` : ''}${p.auto_workers ? `, so Auto uses ${p.auto_workers}` : ''}. If the Mac becomes sluggish during an analysis, choose fewer.</span></div>
         <select class="input" id="p-workers" style="flex:0 0 150px"><option value="0" ${!p.workers ? 'selected' : ''}>Auto${p.auto_workers ? ` (${p.auto_workers})` : ''}</option>${cores.map((n) => `<option value="${n}" ${p.workers === n ? 'selected' : ''}>${n}</option>`).join('')}</select></div></div>

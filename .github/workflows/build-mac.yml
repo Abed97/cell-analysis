@@ -128,28 +128,28 @@ jobs:
           PORT="$(cat "$R")"
           echo "backend on port $PORT"
           curl -sf "http://127.0.0.1:$PORT/api/state" | grep -q '"PIP-FUCCI"'
-          curl -sf "http://127.0.0.1:$PORT/" | grep -q "CycleTrack"
+          curl -sf "http://127.0.0.1:$PORT/" | grep -q "Mitosight"
           kill %1 || true
 
       - name: Make the DMG
         run: |
-          # new installs see "CycleTrack.app"; inside, the executable keeps its internal name
+          # new installs see "Mitosight.app"; inside, the executable keeps its internal name
           mkdir dmg
-          cp -R dist/PIP-FUCCI.app dmg/CycleTrack.app
+          cp -R dist/PIP-FUCCI.app dmg/Mitosight.app
           ln -s /Applications dmg/Applications
-          cp "packaging/How to open CycleTrack the first time.pdf" dmg/
+          cp "packaging/How to open Mitosight the first time.pdf" dmg/
           for i in 1 2 3; do
-            hdiutil create -volname "CycleTrack" -srcfolder dmg -ov -format UDZO "CycleTrack-${{ matrix.label }}.dmg" && break
+            hdiutil create -volname "Mitosight" -srcfolder dmg -ov -format UDZO "Mitosight-${{ matrix.label }}.dmg" && break
             sleep 10
           done
-          test -f "CycleTrack-${{ matrix.label }}.dmg"
-          dmg/CycleTrack.app/Contents/MacOS/PIP-FUCCI --whoami
+          test -f "Mitosight-${{ matrix.label }}.dmg"
+          dmg/Mitosight.app/Contents/MacOS/PIP-FUCCI --whoami
 
       - uses: actions/upload-artifact@v4
         with:
           name: mac-${{ matrix.label }}
           path: |
-            CycleTrack-${{ matrix.label }}.dmg
+            Mitosight-${{ matrix.label }}.dmg
             PIP-FUCCI-${{ matrix.label }}.app.zip
             PIP-FUCCI-${{ matrix.label }}.app.zip.sha256
 
@@ -173,12 +173,12 @@ jobs:
             echo
             echo "Installed copies download this version automatically; the blue Update now button at the top right switches to it (or it switches the next time the app opens)."
             echo
-            echo "**New install:** Apple menu > About This Mac shows *Apple M…* → **CycleTrack-AppleSilicon.dmg**, *Intel* → **CycleTrack-Intel.dmg**. Open it, drag CycleTrack to Applications, and follow *How to open CycleTrack the first time.pdf* inside. Needs macOS 12 or later. (The PIP-FUCCI-*.app.zip files are for automatic updates.)"
+            echo "**New install:** Apple menu > About This Mac shows *Apple M…* → **Mitosight-AppleSilicon.dmg**, *Intel* → **Mitosight-Intel.dmg**. Open it, drag Mitosight to Applications, and follow *How to open Mitosight the first time.pdf* inside. Needs macOS 12 or later. (The PIP-FUCCI-*.app.zip files are for automatic updates.)"
           } > notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
-          name: CycleTrack ${{ needs.version.outputs.version }}
+          name: Mitosight ${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
           body_path: notes.md
           make_latest: "true"

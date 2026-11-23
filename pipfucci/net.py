@@ -60,7 +60,7 @@ def urlopen(req, timeout: float = 20):
 
 def check(url: str = "https://api.github.com/") -> str:
     """For the build machine and support: which trust store works ("system", "certifi", ...)."""
-    req = urllib.request.Request(url, headers={"User-Agent": "CycleTrack"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Mitosight"})
     try:
         with urlopen(req, timeout=20) as r:
             r.read(64)

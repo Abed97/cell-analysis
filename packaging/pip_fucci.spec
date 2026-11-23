@@ -53,10 +53,10 @@ if sys.platform == "darwin":
         bundle_identifier="org.pipfucci.app",
         version=__version__,
         info_plist={
-            # shown as CycleTrack (menu bar, Dock, notifications); the bundle and executable keep the
+            # shown as Mitosight (menu bar, Dock, notifications); the bundle and executable keep the
             # internal name PIP-FUCCI so installed copies keep updating themselves
-            "CFBundleName": "CycleTrack",
-            "CFBundleDisplayName": "CycleTrack",
+            "CFBundleName": "Mitosight",
+            "CFBundleDisplayName": "Mitosight",
             "CFBundleShortVersionString": __version__,
             "CFBundleVersion": __version__,
             "LSMinimumSystemVersion": "12.0",
@@ -65,10 +65,10 @@ if sys.platform == "darwin":
             "LSApplicationCategoryType": "public.app-category.education",
             # the window talks to the app's own server on 127.0.0.1
             "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
-            "NSDocumentsFolderUsageDescription": "CycleTrack reads Incucyte images and saves results next to them.",
-            "NSDesktopFolderUsageDescription": "CycleTrack reads Incucyte images and saves results next to them.",
-            "NSDownloadsFolderUsageDescription": "CycleTrack reads Incucyte images and saves results next to them.",
-            "NSRemovableVolumesUsageDescription": "CycleTrack reads Incucyte images from external drives.",
-            "NSNetworkVolumesUsageDescription": "CycleTrack reads Incucyte images from network drives.",
+            "NSDocumentsFolderUsageDescription": "Mitosight reads Incucyte images and saves results next to them.",
+            "NSDesktopFolderUsageDescription": "Mitosight reads Incucyte images and saves results next to them.",
+            "NSDownloadsFolderUsageDescription": "Mitosight reads Incucyte images and saves results next to them.",
+            "NSRemovableVolumesUsageDescription": "Mitosight reads Incucyte images from external drives.",
+            "NSNetworkVolumesUsageDescription": "Mitosight reads Incucyte images from network drives.",
         },
     )
