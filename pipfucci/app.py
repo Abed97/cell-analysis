@@ -61,6 +61,13 @@ def selftest() -> int:
         assert analysis.frame_cells(exp, "B2", 1, 3)["cells"], "no cells in frame"
         out = export_all(exp)
         assert (out / "Tracks.csv").exists() and (out / "Figure data").is_dir()
+        from . import annotate  # annotated images: fonts with µ, TIFF writer, vector contours
+
+        lay = {"phase", "red", "green", "masks", "confluence"}
+        ra = annotate.export(exp, "B2", 1, [3, 6], lay, fmt="tif", scale=2, numbers=True, strip=True)
+        rs = annotate.export(exp, "B2", 1, [3], lay, fmt="svg")
+        assert len(ra["paths"]) == 3 and "nucleus-outlines" in Path(rs["paths"][0]).read_text()
+        print("annotated image font:", getattr(annotate._font(20), "path", "built-in"), flush=True)
         srv, port = serve(0)
         st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=10).read())
         assert st["app"] == "PIP-FUCCI" and st["display_name"] == DISPLAY_NAME

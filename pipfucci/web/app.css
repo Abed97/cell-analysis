@@ -237,3 +237,7 @@ table.dur td:last-child { text-align: right; font-family: var(--mono); }
 .rm-details summary { cursor: pointer; padding: 4px 0; color: var(--text); }
 .rm-details summary:focus-visible { outline: 2px solid var(--accent, #9CC2FF); outline-offset: 2px; border-radius: 4px; }
 .rm-details .ex-list { margin-top: 8px; }
+.exp-panel { margin-top: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--well); }
+.exp-grid { display: flex; flex-direction: column; gap: 12px; }
+.exp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.exp-l { flex: 0 0 96px; font-size: 13px; color: var(--text2); }

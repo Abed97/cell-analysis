@@ -83,6 +83,16 @@ images become gaps (or, if a well has other fields at that time, the count is sc
 that remain) in every chart, figure and Prism table, and are marked `excluded` in the per-cell and
 per-track tables.
 
+**Exporting annotated images for a paper or talk:** in Segment & gate, *Export image* saves the
+image on screen with the layers that are on (nucleus outlines coloured by phase, cell numbers,
+confluence area) plus time, scale bar, a label and an optional phase legend, drawn from the full
+camera image (not a screenshot). PNG for slides, TIFF for journals (both at 1×, 2× or 4× the camera
+pixels; pixels are repeated, never smoothed, and annotations are drawn at that size; 300 dpi),
+or SVG for Illustrator/Inkscape/Affinity (the image embedded unchanged, every outline, number and
+label a separate vector layer). *Several* time points export one image each and can also be
+joined into one strip; *Follow the selected cell* crops a square around a cell and then its
+daughters, for a filmstrip of one cycle. Files go to the experiment folder, Figures › Images.
+
 **Removing objects by hand:** in Segment & gate, click something that was counted wrongly
 (debris, a bright spot, a double count). *Remove here* (or the **Delete** key) leaves that nucleus
 out of the counts in this image; *Remove in every image* leaves out its whole track. With

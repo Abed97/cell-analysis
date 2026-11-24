@@ -535,3 +535,32 @@ def test_hand_removal_survives_retracking(exp):
     finally:
         exp.settings.update({"removed": []})
         exp.save()
+
+
+def test_export_annotated_images(exp):
+    from PIL import Image
+
+    from pipfucci import annotate
+
+    layers = {"phase", "red", "green", "bgsub", "masks", "confluence"}
+    w, f = "B2", 1
+    r = annotate.export(exp, w, f, [10], layers, fmt="png", scale=2, numbers=True, legend=True)
+    im = Image.open(r["paths"][0])
+    h0, w0 = exp.meta["movies"][f"{w}_{f}"]["shape"][:2]
+    assert im.size == (2 * w0, 2 * h0) and round(im.info["dpi"][0]) == 300
+    r = annotate.export(exp, w, f, [10], layers, fmt="tif", scale=1)
+    assert Image.open(r["paths"][0]).size == (w0, h0)
+    r = annotate.export(exp, w, f, [10], layers, fmt="svg", numbers=True)
+    doc = Path(r["paths"][0]).read_text()
+    assert 'id="nucleus-outlines"' in doc and 'id="confluence"' in doc and "µm" in doc and "data:image/png;base64," in doc
+    # a square following a dividing cell, as separate images and one strip
+    t = exp.tracks
+    trk = t[(t["n_children"] > 0) & (t["well"] == w) & (t["field"] == f)].index[0]
+    end = int(t.loc[trk, "end"])
+    r = annotate.export(exp, w, f, [max(0, end - 4), end, min(48, end + 6)], {"phase", "green", "red", "masks"}, fmt="png",
+                        scale=2, select_track=trk, crop_um=40, strip=True)
+    assert len(r["paths"]) == 4 and r["paths"][-1].endswith("Time strip.png")
+    side = int(round(40 / exp.settings.pixel_um)) * 2
+    assert Image.open(r["paths"][0]).size == (side, side)
+    strip = Image.open(r["paths"][-1])
+    assert strip.size[1] == side and strip.size[0] > 3 * side

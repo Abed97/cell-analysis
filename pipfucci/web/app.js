@@ -53,6 +53,7 @@ const fail = (e) => toast(e.message || String(e), { bad: true });
 
 const ICON = {
   folder: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>',
+  download: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"></path></svg>',
   check: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3FBF6A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5L20 7"></path></svg>',
   warn: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F2C94C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9.5 17h-19z"></path><path d="M12 10v4M12 17h.01"></path></svg>',
   info: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9CC2FF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg>',
@@ -484,7 +485,8 @@ function renderViewer() {
           <div class="legend" role="group" aria-label="Layers">${layers}</div>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="small muted">Use in results</span>
             <div class="seg" role="group" aria-label="Use this image in results" title="Leave out blurry images. Nothing is re-analysed; they are just left out of the results, figures and exports.">
-              <button type="button" data-useres="yes">Yes</button><button type="button" data-useres="image" title="Only this image: this field at this time point (key X)">Not this image</button><button type="button" data-useres="field" title="This field at every time point">Not this field</button><button type="button" data-useres="well" title="Every field of the well, at every time point">Not well ${esc(S.v.well)}</button></div></div></div>
+              <button type="button" data-useres="yes">Yes</button><button type="button" data-useres="image" title="Only this image: this field at this time point (key X)">Not this image</button><button type="button" data-useres="field" title="This field at every time point">Not this field</button><button type="button" data-useres="well" title="Every field of the well, at every time point">Not well ${esc(S.v.well)}</button></div>
+            <button type="button" class="btn sm" id="exp-toggle" style="margin-left:auto" aria-expanded="${S.v.expOpen ? 'true' : 'false'}" aria-controls="exp-panel" title="Save this image with its outlines, numbers and confluence at full resolution, for a paper or a talk">${ICON.download || ''} Export image</button></div></div>
         <div class="viewer-wrap" id="vwrap" style="aspect-ratio:${shape[1]} / ${shape[0]}">
           <img id="frame-img" alt="Field of view with segmented nuclei">
           <svg class="ids-layer" id="ids" viewBox="0 0 ${shape[1]} ${shape[0]}" preserveAspectRatio="none" aria-label="Cell numbers"></svg>
@@ -510,6 +512,7 @@ function renderViewer() {
           <div style="display:flex;flex-direction:column;align-items:flex-end;font-family:var(--mono);font-size:12px;color:var(--text2);min-width:120px">
             <span style="font-size:14px;color:var(--text)" id="t-label"></span><span id="f-label"></span></div>
         </div>
+        <div id="exp-panel" class="exp-panel" ${S.v.expOpen ? '' : 'hidden'}></div>
         <div class="ex-list" id="ex-list"></div>
         <div id="rm-list"></div>
         <div id="sel-info"></div>
@@ -558,6 +561,8 @@ function renderViewer() {
       </div></div>`;
 
   $$('[data-useres]').forEach((b) => b.onclick = () => setUseRes(b.dataset.useres));
+  $('#exp-toggle').onclick = () => { S.v.expOpen = !S.v.expOpen; $('#exp-toggle').setAttribute('aria-expanded', S.v.expOpen ? 'true' : 'false'); renderExportPanel(); };
+  renderExportPanel();
   $('#movie').onchange = (ev) => { const [w, f] = ev.target.value.split('|'); S.v.well = w; S.v.field = parseInt(f, 10); S.v.sel = null; S.v.spot = null; stopPlay(); renderViewer(); };
   $$('input[data-layer]').forEach((c) => c.onchange = () => {
     const k = c.dataset.layer;
@@ -820,6 +825,71 @@ async function pickCell(ev) {
   selInfo();
 }
 
+const EXP_LAYER_NAMES = { phase: 'phase contrast', red: 'mCherry-Geminin', green: 'PIP-mVenus', bgsub: 'background removed', masks: 'nucleus outlines', confluence: 'confluence area' };
+
+function renderExportPanel() {
+  const box = $('#exp-panel');
+  if (!box) return;
+  box.hidden = !S.v.expOpen;
+  if (!S.v.expOpen) return;
+  const e = S.st.experiment;
+  const o = S.v.exp || (S.v.exp = { fmt: 'png', scale: 2, time: true, bar: true, label: 'field', legend: false, text: 'medium', area: 'all', crop: 100, when: 'now', hours: '', strip: false });
+  const shape = S.v.shape || [1040, 1408];
+  const sc = o.fmt === 'svg' ? 1 : o.scale;
+  const cw = o.area === 'cell' && S.v.sel ? Math.round(o.crop / e.settings.pixel_um) : shape[1];
+  const chh = o.area === 'cell' && S.v.sel ? cw : shape[0];
+  const cm = (cw * sc / 300 * 2.54).toFixed(1);
+  const shown = ['phase', 'green', 'red', 'bgsub', 'masks', 'confluence'].filter((k) => S.v.layers.has(k)).map((k) => EXP_LAYER_NAMES[k]);
+  if (S.v.ids) shown.push('cell numbers');
+  const seg = (name, items) => `<div class="seg" role="group" aria-label="${name}">${items.map(([v, label, title]) => `<button type="button" data-exo="${name}" data-v="${v}" aria-pressed="${String(o[name]) === String(v)}" ${title ? `title="${title}"` : ''}>${label}</button>`).join('')}</div>`;
+  box.innerHTML = `<div class="exp-grid">
+    <div class="exp-row"><span class="exp-l">Format</span>${seg('fmt', [['png', 'PNG', 'For slides and posters'], ['tif', 'TIFF', 'What most journals ask for'], ['svg', 'SVG', 'Editable in Illustrator, Inkscape or Affinity: the image pixels are unchanged and every outline, number and label is a sharp vector']])}</div>
+    ${o.fmt === 'svg' ? `<div class="exp-row"><span class="exp-l">Size</span><span class="small muted">Camera pixels (${cw} × ${chh}) with vector annotations, sharp at any size</span></div>`
+      : `<div class="exp-row"><span class="exp-l">Size</span>${seg('scale', [[1, '1×', 'The camera pixels, nothing added'], [2, '2×', 'Each camera pixel drawn as 2 × 2, so outlines and text are finer'], [4, '4×', 'Each camera pixel drawn as 4 × 4: the finest outlines and text']])}<span class="small muted">${cw * sc} × ${chh * sc} px · ${cm} cm wide at 300 dpi. Camera pixels are repeated, never smoothed.</span></div>`}
+    <div class="exp-row"><span class="exp-l">Shows</span><span class="small">${shown.length ? esc(shown.join(', ')) : 'nothing: turn layers on above'}</span><span class="small muted">as in the viewer; change it with the layer buttons above</span></div>
+    <div class="exp-row"><span class="exp-l">Add</span>
+      <label class="chip"><input type="checkbox" data-exc="time" ${o.time ? 'checked' : ''}>Time</label>
+      <label class="chip"><input type="checkbox" data-exc="bar" ${o.bar ? 'checked' : ''}>Scale bar</label>
+      <label class="chip"><input type="checkbox" data-exc="legend" ${o.legend ? 'checked' : ''}>Phase legend</label></div>
+    <div class="exp-row"><label class="exp-l" for="exp-label">Label</label><select class="input" id="exp-label" style="height:36px;flex:0 1 200px">${[['field', `${S.v.well} · field ${S.v.field}`], ['condition', 'Condition name'], ['none', 'None']].map(([v, n]) => `<option value="${v}" ${o.label === v ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>
+      <label class="small muted" for="exp-text" style="margin-left:8px">Text size</label><select class="input" id="exp-text" style="height:36px;flex:0 1 130px">${['small', 'medium', 'large'].map((v) => `<option value="${v}" ${o.text === v ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+    <div class="exp-row"><span class="exp-l">Area</span>${seg('area', [['all', 'Whole image'], ['cell', 'Follow the selected cell', 'A square around the selected cell, following it and then its daughters']])}
+      ${o.area === 'cell' ? (S.v.sel ? `<span class="unit-input" style="flex:0 0 130px"><input id="exp-crop" type="number" min="10" max="2000" step="10" value="${o.crop}" aria-label="Square size"><span>µm</span></span><span class="small muted">around cell ${esc(S.v.sel.split('-')[2])}</span>` : '<span class="small" style="color:#FF9A3C">Click a cell in the image first.</span>') : ''}</div>
+    <div class="exp-row"><span class="exp-l">Time points</span>${seg('when', [['now', `This image (${num(e.hours[S.v.frame])} h)`], ['several', 'Several']])}
+      ${o.when === 'several' ? `<input class="input" id="exp-hours" style="flex:1 1 200px;height:36px" placeholder="hours, e.g. 0, 24, 48, 72" value="${esc(o.hours)}" aria-label="Hours to export"><label class="chip"><input type="checkbox" data-exc="strip" ${o.strip ? 'checked' : ''}>Also as one strip</label>` : ''}</div>
+    <div class="exp-row" style="justify-content:flex-end"><span class="small muted" style="margin-right:auto">Saved in the experiment folder, under Figures › Images.</span><button type="button" class="btn primary" id="exp-go">Export</button></div>
+  </div>`;
+  $$('[data-exo]').forEach((b) => b.onclick = () => { const k = b.dataset.exo, v = b.dataset.v; o[k] = k === 'scale' ? +v : v; renderExportPanel(); });
+  $$('[data-exc]').forEach((c) => c.onchange = () => { o[c.dataset.exc] = c.checked; });
+  $('#exp-label').onchange = (ev) => { o.label = ev.target.value; };
+  $('#exp-text').onchange = (ev) => { o.text = ev.target.value; };
+  const crop = $('#exp-crop'); if (crop) crop.onchange = () => { o.crop = Math.max(10, +crop.value || 100); renderExportPanel(); };
+  const hrs = $('#exp-hours'); if (hrs) hrs.oninput = () => { o.hours = hrs.value; };
+  $('#exp-go').onclick = exportImage;
+}
+
+async function exportImage() {
+  const o = S.v.exp, btn = $('#exp-go');
+  const body = { well: S.v.well, field: S.v.field, fmt: o.fmt, scale: o.scale, layers: [...S.v.layers], numbers: !!S.v.ids,
+    time: o.time, bar: o.bar, legend: o.legend, label: o.label, text: o.text, strip: o.when === 'several' && o.strip };
+  if (o.when === 'several') {
+    const hs = (o.hours || '').split(/[,;\s]+/).map((x) => parseFloat(x)).filter((x) => Number.isFinite(x));
+    if (!hs.length) { toast('Type the hours to export, e.g. 0, 24, 48, 72.'); $('#exp-hours').focus(); return; }
+    body.hours = hs;
+  } else body.frames = [S.v.frame];
+  if (o.area === 'cell') {
+    if (!S.v.sel) { toast('Click a cell in the image first.'); return; }
+    body.sel = S.v.sel; body.crop_um = o.crop;
+  }
+  btn.disabled = true; btn.textContent = 'Exporting…';
+  try {
+    const r = await api('export_image', body);
+    const n = r.paths.length;
+    toast(`Saved ${n === 1 ? 'the image' : n + ' files'} (${{ png: 'PNG', tif: 'TIFF', svg: 'SVG' }[o.fmt]}).`, { action: { label: 'Show in Finder', fn: () => api('reveal', { path: r.paths[n - 1] }).catch(fail) }, ms: 12000 });
+  } catch (err) { fail(err); }
+  btn.disabled = false; btn.textContent = 'Export';
+}
+
 function movieRemovals() {
   const e = S.st && S.st.experiment;
   if (!e || !e.settings || !e.settings.removed) return [];
@@ -877,6 +947,7 @@ function updateRemovedList() {
 function selInfo() {
   const box = $('#sel-info');
   if (!box) return;
+  if (S.v.expOpen && S.v.exp && S.v.exp.area === 'cell') renderExportPanel();
   if (!S.v.sel && S.v.spot && S.v.spot.frame === S.v.frame) {
     const p = S.v.spot.patch;
     box.innerHTML = p

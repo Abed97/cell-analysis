@@ -426,6 +426,34 @@ def need_exp():
     return STATE.exp
 
 
+def export_image(b: dict) -> dict:
+    """Annotated images of the viewer's field for a paper or a talk (see annotate.py)."""
+    from . import annotate
+
+    exp = need_results()
+    well, field = str(b["well"]), int(b["field"])
+    if f"{well}_{field}" not in exp.meta.get("movies", {}):
+        raise ValueError("No such field.")
+    hours = exp.frame_hours()
+    if b.get("hours"):
+        frames = []
+        for h in b["hours"]:
+            f = int(np.argmin(np.abs(np.asarray(hours) - float(h))))
+            if f not in frames:
+                frames.append(f)
+    else:
+        frames = [int(f) for f in b.get("frames") or [] if 0 <= int(f) < len(hours)]
+    allowed = {"phase", "red", "green", "bgsub", "masks", "confluence"}
+    layers = {x for x in b.get("layers") or [] if x in allowed}
+    crop = float(b["crop_um"]) if b.get("crop_um") and b.get("sel") else None
+    if crop is not None and not 5 <= crop <= 5000:
+        raise ValueError("The square should be between 5 and 5000 µm.")
+    return annotate.export(exp, well, field, frames, layers, fmt=str(b.get("fmt", "png")), scale=int(b.get("scale", 2)),
+                           numbers=bool(b.get("numbers")), select_track=b.get("sel") or None, crop_um=crop,
+                           strip=bool(b.get("strip")), label=str(b.get("label", "field")), time=bool(b.get("time", True)),
+                           bar=bool(b.get("bar", True)), legend=bool(b.get("legend")), text=str(b.get("text", "medium")))
+
+
 def hand_remove(b: dict) -> dict:
     """Take one object out of the counts by hand: a nucleus in this image ("object"), its whole
     track ("track"), or a confluence area ("patch", in this image or with every=True in all)."""
@@ -706,6 +734,8 @@ class Handler(BaseHTTPRequestHandler):
             if ep == "cancel":
                 STATE.cancel.set()
                 return self._json({"ok": True})
+            if ep == "export_image":
+                return self._json(export_image(b))
             if ep == "remove":
                 return self._json(hand_remove(b))
             if ep == "unremove":

@@ -11,8 +11,8 @@ from pipfucci import __version__  # noqa: E402
 
 hidden = ["pipfucci." + m for m in ("app", "server", "experiment", "pipeline", "segment", "track", "phases",
                                      "analysis", "export", "render", "demo", "io_incucyte", "settings", "updater",
-                                     "compare", "macos", "net")]
-hidden += ["truststore", "certifi"]
+                                     "compare", "macos", "net", "annotate")]
+hidden += ["truststore", "certifi", "skimage.measure", "skimage.measure._find_contours"]
 for pkg in ("skimage.feature", "skimage.segmentation", "skimage.filters", "skimage.registration", "imagecodecs"):
     hidden += collect_submodules(pkg)
 if sys.platform == "darwin":
