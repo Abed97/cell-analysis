@@ -77,6 +77,8 @@ class AppState:
         self.is_child = False  # True when started by "Update now" (backend without a window)
         self.shell_pid = os.getpid()
         self.retired = False
+        self.handing_over = False  # "Update now" is starting the newer copy
+        self.remote_worker = None
 
     # ---------------- recent experiments
     def recent(self) -> list:
@@ -90,15 +92,15 @@ class AppState:
         save_json(app_data_dir() / "recent.json", items[:8])
 
     # ---------------- background jobs
-    def start_job(self, name: str, fn) -> None:
+    def start_job(self, name: str, fn, label: str | None = None, where: str | None = None) -> None:
         with self.lock:
             if self.progress.get("running"):
                 raise RuntimeError("Something is already running. Wait for it to finish or cancel it.")
             self.cancel.clear()
             exp = self.exp
             self.progress = {"running": True, "job": name, "stage": "Starting", "fraction": 0.0, "eta_s": None,
-                             "started": time.time(),
-                             "experiment": (exp.settings.experiment_name or exp.folder.name) if exp else None}
+                             "started": time.time(), "where": where, "remote": bool(where),
+                             "experiment": label or ((exp.settings.experiment_name or exp.folder.name) if exp else None)}
 
         def report(**kw):
             self.progress.update(kw)
@@ -127,6 +129,26 @@ class AppState:
 STATE = AppState()
 
 
+def _is_worker() -> bool:
+    """This Mac analyses what the other Macs send (Settings) and the shared folder is here."""
+    from . import remote
+
+    try:
+        pr = remote.prefs()
+        return bool(pr["worker"] and remote.shared_dir(pr["shared"]) is not None)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _plan_info(exp) -> dict:
+    from . import remote
+
+    try:
+        return remote.plan_info(exp)
+    except Exception:  # noqa: BLE001
+        return {"use": False}
+
+
 def experiment_state(exp) -> dict:
     if exp is None:
         return None
@@ -134,6 +156,7 @@ def experiment_state(exp) -> dict:
     s = exp.settings
     return {
         "summary": exp.summary(),
+        "remote": _plan_info(exp),
         "settings": s.to_dict(),
         "derived": s.derived(),
         "has_results": exp.has_results,
@@ -246,6 +269,7 @@ def state() -> dict:
     return {
         "app": APP_NAME, "display_name": DISPLAY_NAME, "version": __version__, "repo": GITHUB_REPO, "platform": sys.platform,
         "native_dialogs": STATE.window is not None or sys.platform == "darwin",
+        "remote_worker": _is_worker(),
         "cellpose": cellpose_available(),
         "experiment": experiment_state(STATE.exp),
         "progress": STATE.progress,
@@ -263,8 +287,13 @@ def open_folder(path: str):
         raise ValueError(f"Folder not found: {p}")
     exp = Experiment(p)
     STATE.exp = exp
-    exp.save()
+    if not (exp.results_dir / "experiment.json").exists():
+        exp.save()
     STATE.add_recent(exp)
+    try:
+        resume_remote(exp)
+    except Exception:  # noqa: BLE001 - optional
+        traceback.print_exc()
     # analysed before colonies existed: measure them from the saved masks (seconds, no re-run)
     if (exp.has_results and exp.stale is None and exp.meta.get("colony_sizes") != 1
             and (exp.results_dir / "masks").is_dir() and not STATE.progress.get("running")):
@@ -374,9 +403,11 @@ def update_now() -> dict:
     if STATE.exp is not None:
         cmd += ["--folder", str(STATE.exp.folder)]
     note_attempt(ver)
+    STATE.handing_over = True  # no new work for the other Macs from this copy
     try:
         port = spawn_backend(cmd, ready)
     except Exception:
+        STATE.handing_over = False
         note_failed(ver)
         raise
     UPDATER.stop()
@@ -522,6 +553,129 @@ def need_results():
     return exp
 
 
+def _remote_or_here(name: str, exp, local) -> dict:
+    """Run a heavy job here, or on the other Mac through the shared folder (Settings)."""
+    from . import remote
+
+    try:
+        p = remote.plan(exp)
+    except Exception:  # noqa: BLE001 - a broken shared folder never blocks working here
+        traceback.print_exc()
+        p = None
+    if p is None:
+        STATE.start_job(name, local)
+        return {"ok": True}
+    ok, msg = exp.channels_ok()
+    if not ok:
+        raise ValueError(msg)
+    rid = remote.submit(exp, name, p["shared"])
+    STATE.start_job(name, lambda report: follow_remote(exp.folder, p["shared"], rid, report), where=p["target"])
+    return {"ok": True, "remote": p["target"]}
+
+
+def follow_remote(folder, shared, rid: str, report) -> None:
+    """Wait for the other Mac, then load the results it made (they arrive through the sync)."""
+    from . import remote
+    from .experiment import Experiment
+
+    remote.wait(folder, shared, rid, report, STATE.cancel)
+    report(stage="Loading the results", fraction=1.0)
+    fresh = Experiment(folder)
+    if STATE.exp is not None and Path(STATE.exp.folder) == Path(fresh.folder):
+        STATE.exp = fresh
+    remote.mark_loaded(shared, rid)
+
+
+def resume_remote(exp) -> None:
+    """Opening an experiment that the other Mac is (or was) analysing: keep following it."""
+    from . import remote
+
+    if STATE.progress.get("running"):
+        return
+    shared = remote.shared_dir()
+    r = remote.pending(shared, remote.rel_of(exp.folder, shared))
+    if r is None:
+        return
+    st = remote.read_json(remote.queue_dir(shared) / f"{r['id']}.status.json") or {}
+    STATE.start_job(r.get("job", "analysis"), lambda report: follow_remote(exp.folder, shared, r["id"], report),
+                    where=st.get("host") or "the other Mac")
+
+
+def start_remote_worker() -> None:
+    """On every Mac: listens for analyses sent from her other Macs, when Settings say so."""
+    from . import remote
+    from .experiment import Experiment
+
+    if STATE.remote_worker is not None:
+        return
+
+    def busy():
+        return bool(STATE.progress.get("running")) or STATE.retired or STATE.handing_over
+
+    def done(folder):
+        if STATE.exp is not None and Path(STATE.exp.folder) == Path(folder).resolve():
+            STATE.exp = Experiment(folder)
+
+    STATE.remote_worker = remote.WorkerLoop(busy, lambda n, fn, label: STATE.start_job(n, fn, label=label),
+                                            STATE.cancel, done, alive=lambda: not STATE.retired)
+    STATE.remote_worker.start()
+
+
+def remote_state() -> dict:
+    from . import remote
+
+    pr = remote.prefs()
+    shared = remote.shared_dir(pr["shared"])
+    w = STATE.remote_worker
+    return {"me": remote.computer_name(), "shared": pr["shared"], "shared_ok": shared is not None,
+            "shared_name": shared.name if shared else None, "run_on": pr["run_on"], "worker": pr["worker"],
+            "workers": remote.workers(shared), "plan": remote.plan_info(STATE.exp),
+            "working_on": getattr(w, "current", None)}
+
+
+def remote_prefs(b: dict) -> dict:
+    from . import remote
+    from .updater import save_prefs
+
+    patch = {}
+    if "shared_folder" in b:
+        v = str(b["shared_folder"] or "")
+        if v and not Path(v).expanduser().is_dir():
+            raise ValueError(f"Folder not found: {v}")
+        patch["shared_folder"] = v
+    if "run_on" in b:
+        patch["run_on"] = "remote" if b["run_on"] == "remote" else "here"
+    if "worker" in b:
+        patch["worker"] = bool(b["worker"])
+    save_prefs(patch)
+    pr = remote.prefs()
+    shared = remote.shared_dir(pr["shared"])
+    if pr["worker"] and shared is not None:
+        try:
+            remote.heartbeat(shared, None, os.cpu_count())
+        except OSError:
+            pass
+    return remote_state()
+
+
+def add_login_item() -> dict:
+    """Open Mitosight when this Mac starts (Login Items), for a Mac that works for the others."""
+    import os as _os
+
+    stub = _os.environ.get("PIPFUCCI_STUB")
+    exe = Path(stub) if stub else Path(sys.executable)
+    app = next((p for p in [exe, *exe.parents] if p.suffix == ".app"), None)
+    if sys.platform != "darwin" or app is None or not getattr(sys, "frozen", False):
+        raise ValueError("Only the Mac app can open itself at login.")
+    script = ('tell application "System Events" to if not (exists login item "%s") then '
+              'make login item at end with properties {path:"%s", hidden:false}' % (app.stem, str(app)))
+    out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
+    if out.returncode != 0:
+        raise ValueError("macOS did not allow it. Add Mitosight in System Settings › General › Login Items "
+                         "(the + button), or allow Mitosight to control System Events when asked.")
+    return {"ok": True, "app": str(app)}
+
+
 def run_analysis():
     exp = need_exp()
 
@@ -532,8 +686,7 @@ def run_analysis():
     def job(report):
         exp.run(progress=report, cancel=STATE.cancel, workers=workers)
 
-    STATE.start_job("analysis", job)
-    return {"ok": True}
+    return _remote_or_here("analysis", exp, job)
 
 
 def run_remask():
@@ -541,8 +694,7 @@ def run_remask():
     from .updater import load_prefs
 
     workers = load_prefs().get("workers") or None
-    STATE.start_job("remask", lambda report: exp.remask(progress=report, cancel=STATE.cancel, workers=workers))
-    return {"ok": True}
+    return _remote_or_here("remask", exp, lambda report: exp.remask(progress=report, cancel=STATE.cancel, workers=workers))
 
 
 def run_remeasure():
@@ -550,8 +702,7 @@ def run_remeasure():
     from .updater import load_prefs
 
     workers = load_prefs().get("workers") or None
-    STATE.start_job("measure", lambda report: exp.remeasure(progress=report, cancel=STATE.cancel, workers=workers))
-    return {"ok": True}
+    return _remote_or_here("measure", exp, lambda report: exp.remeasure(progress=report, cancel=STATE.cancel, workers=workers))
 
 
 def run_retrack():
@@ -625,6 +776,8 @@ class Handler(BaseHTTPRequestHandler):
             ep = u.path[5:]
             if ep == "state":
                 return self._json(state())
+            if ep == "remote":
+                return self._json(remote_state())
             if ep == "progress":
                 return self._json(STATE.progress)
             if ep == "frame":
@@ -734,6 +887,13 @@ class Handler(BaseHTTPRequestHandler):
             if ep == "cancel":
                 STATE.cancel.set()
                 return self._json({"ok": True})
+            if ep == "remote_prefs":
+                return self._json(remote_prefs(b))
+            if ep == "pick_shared":
+                pth = pick_folder()
+                return self._json(remote_prefs({"shared_folder": pth}) if pth else remote_state())
+            if ep == "login_item":
+                return self._json(add_login_item())
             if ep == "export_image":
                 return self._json(export_image(b))
             if ep == "remove":

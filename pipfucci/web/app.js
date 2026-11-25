@@ -144,6 +144,7 @@ function startPolling(force = false) {
     const what = p.job === 'retrack' ? 'Re-tracking' : p.job === 'measure' || p.job === 'remask' ? 'Confluence' : 'Analysis';
     if (p.error) toast(`${what} failed: ` + p.error, { bad: true });
     else if (p.cancelled) toast('Cancelled.');
+    else if (p.stage === 'Done' && p.job === 'remote') toast(`Finished for another Mac: ${p.experiment || 'an experiment'}.`);
     else if (p.stage === 'Done' && (p.job === 'measure' || p.job === 'remask')) toast('Confluence and colonies updated.');
     else if (p.stage === 'Done' && p.job !== 'demo') toast(`${what} finished.`, { action: hasResults() ? { label: 'View results', fn: () => setView('viewer') } : null });
     if (p.job === 'measure' || p.job === 'remask') { S.v.ver++; S.pop.dist = null; if (S.view !== 'experiment') render(); }
@@ -169,9 +170,13 @@ document.addEventListener('visibilitychange', () => {
 function renderJobPill(p) {
   const el = document.getElementById('job-pill');
   if (!el) return;
-  if (!p || !p.running) { el.innerHTML = ''; return; }
+  if (!p || !p.running) {
+    el.innerHTML = S.st && S.st.remote_worker ? `<span class="pill" title="Analyses sent from your other Macs through the shared folder run here. Keep Mitosight open; the screen may lock."><span class="dot" style="background:#7FD69B" aria-hidden="true"></span>Ready for your other Macs</span>` : '';
+    return;
+  }
   const pct = Math.round((p.fraction || 0) * 100);
-  el.innerHTML = `<button class="pill" id="job-btn" style="cursor:pointer" title="${esc(p.stage || 'Working')}: ${pct}%. Click to see details."><span class="spin-dot" aria-hidden="true"></span>${esc(p.stage || 'Working')} <span class="mono">${pct}%</span><span class="minibar"><div style="width:${pct}%"></div></span></button>`;
+  const who = p.job === 'remote' ? `For another Mac: ` : p.remote ? `On ${esc(p.where || 'the other Mac')}: ` : '';
+  el.innerHTML = `<button class="pill" id="job-btn" style="cursor:pointer" title="${esc(p.experiment || '')} · ${esc(p.stage || 'Working')}: ${pct}%. Click to see details."><span class="spin-dot" aria-hidden="true"></span>${who}${esc(p.stage || 'Working')} <span class="mono">${pct}%</span><span class="minibar"><div style="width:${pct}%"></div></span></button>`;
   $('#job-btn').onclick = () => setView('experiment');
 }
 
@@ -188,7 +193,9 @@ function progressHTML(p) {
   const frames = p.total ? `${p.done || 0} of ${p.total} ${p.unit || 'frames'}` : '';
   return `<div class="progress" id="prog">
     <div class="runbar"><strong id="prog-stage">${esc(p.stage || 'Working')}…</strong><span class="mono small muted" id="prog-txt">${pct}% · ${esc(frames)} ${esc(fmtEta(p.eta_s))}</span></div>
-    ${p.workers > 1 ? `<span class="small muted">Using ${p.workers} processor cores. You can switch to other apps; the analysis keeps going and the Dock icon shows the progress.</span>` : ''}
+    ${p.remote && p.job !== 'remote' ? `<span class="small muted">On <strong>${esc(p.where || 'the other Mac')}</strong> through the shared folder${p.remote_seen ? ` · last news ${esc(p.remote_seen)}` : ''}. You can close this Mac or quit Mitosight: the other Mac keeps going, and opening this experiment again shows the results.</span>`
+      : p.job === 'remote' ? `<span class="small muted">Analysing <strong>${esc(p.experiment || '')}</strong>, sent through the shared folder. The other Mac shows the progress too.</span>`
+      : p.workers > 1 ? `<span class="small muted">Using ${p.workers} processor cores. You can switch to other apps; the analysis keeps going and the Dock icon shows the progress.</span>` : ''}
     <div class="bar"><div id="prog-bar" style="width:${pct}%"></div></div>
     <div><button class="btn sm" id="btn-cancel">Cancel</button></div></div>`;
 }
@@ -275,7 +282,14 @@ function runCard(e) {
       msg = `<strong>Analysed</strong><span class="muted"> · ${esc((e.run || '').replace('T', ' '))} · ${e.n_cells.toLocaleString()} detections in ${e.n_tracks.toLocaleString()} tracks.</span>`;
       btns = `<button class="btn" id="btn-run">Re-run analysis</button><button class="btn primary" id="btn-next">Continue to segmentation ${ICON.arrow}</button>`;
     }
-    body = `<div class="runbar"><div>${msg}${e.channels_ok ? '' : `<div class="small" style="color:#F7DFA0;margin-top:4px">${esc(e.channels_msg)}</div>`}</div><div style="display:flex;gap:10px;flex-wrap:wrap">${btns}</div></div>`;
+    const rm = e.remote || {};
+    if (rm.use) btns = btns.replace(/(Run analysis|Re-run analysis|Re-run everything)/, `$1 on ${esc(rm.target)}`);
+    const where = rm.use
+      ? `<div class="small" style="margin-top:4px;color:${rm.online ? 'var(--text2)' : '#F7DFA0'}">${rm.online
+        ? `Runs on <strong>${esc(rm.target)}</strong> (seen ${esc(rm.seen)}) through the shared folder. This Mac can be closed; the results appear on both Macs.`
+        : `<strong>${esc(rm.target)}</strong> was last seen ${esc(rm.seen)}. The analysis starts when it is on with Mitosight open. To analyse here instead, choose This Mac in Settings.`}</div>`
+      : rm.why ? `<div class="small muted" style="margin-top:4px">${esc(rm.why)}</div>` : '';
+    body = `<div class="runbar"><div>${msg}${where}${e.channels_ok ? '' : `<div class="small" style="color:#F7DFA0;margin-top:4px">${esc(e.channels_msg)}</div>`}</div><div style="display:flex;gap:10px;flex-wrap:wrap">${btns}</div></div>`;
     if (p.error) body = `<div class="err">The last run failed: ${esc(p.error)}</div>` + body;
   }
   return `<section class="card" aria-label="Analysis">${body}</section>`;
@@ -1783,6 +1797,7 @@ async function openSettings() {
     <div><h3>Processing</h3>
       <div class="setrow"><div class="lbl"><label for="p-workers">Processor cores for analysis</label><span>Images are segmented in parallel, each core using about 0.3 GB of memory. Auto uses all but one core, keeping 3 GB free for macOS and other apps. This Mac has ${p.cpus} core${p.cpus === 1 ? '' : 's'}${p.mem_gb ? ` and ${p.mem_gb} GB of memory` : ''}${p.auto_workers ? `, so Auto uses ${p.auto_workers}` : ''}. If the Mac becomes sluggish during an analysis, choose fewer.</span></div>
         <select class="input" id="p-workers" style="flex:0 0 150px"><option value="0" ${!p.workers ? 'selected' : ''}>Auto${p.auto_workers ? ` (${p.auto_workers})` : ''}</option>${cores.map((n) => `<option value="${n}" ${p.workers === n ? 'selected' : ''}>${n}</option>`).join('')}</select></div></div>
+    <div id="remote-set"></div>
     <div class="info">${ICON.check}<span>Everything is saved automatically: settings, plate map, gates, track flags and results go to the “PIP-FUCCI results” folder next to the images as soon as they change. There is no Save button to forget.</span></div>
     <div class="kv small"><span class="muted">Version</span><span class="mono">${esc(S.st.version)}</span></div>`;
   $('#modal').hidden = false;
@@ -1795,10 +1810,44 @@ async function openSettings() {
   $('#p-install').onchange = (ev) => save({ auto_install: ev.target.checked });
   $('#p-workers').onchange = (ev) => save({ workers: parseInt(ev.target.value, 10) });
   $('#p-notify').onchange = (ev) => save({ notify: ev.target.checked });
+  renderRemoteSettings();
   $('#p-now').onclick = async () => {
     $('#set-status').textContent = 'Checking…';
     try { await api('check_updates', {}); setTimeout(refreshUpdate, 1500); setTimeout(refreshUpdate, 5000); } catch (e) { fail(e); }
   };
+}
+
+function prettyCloud(path) {
+  // ~/Library/CloudStorage/OneDrive-McGillUniversity/Lab/PIP → OneDrive (McGillUniversity) › Lab › PIP
+  const m = path.match(/\/Library\/CloudStorage\/([^/]+)\/?(.*)$/);
+  if (!m) return path;
+  const [svc, acct] = m[1].split(/-(.+)/);
+  return [`${svc}${acct ? ` (${acct})` : ''}`, ...m[2].split('/').filter(Boolean)].join(' › ');
+}
+
+async function renderRemoteSettings(r) {
+  const box = $('#remote-set');
+  if (!box) return;
+  if (!r) { try { r = await api('remote'); } catch (e) { box.innerHTML = ''; return; } }
+  const others = r.workers.filter((w) => w.name !== r.me);
+  const target = others[0];
+  const wl = r.workers.map((w) => `<li><strong>${esc(w.name)}</strong>${w.name === r.me ? ' (this Mac)' : ''} · <span style="color:${w.online ? '#7FD69B' : '#F7DFA0'}">${w.online ? 'on' : 'not seen'}</span>, last seen ${esc(w.seen)}${w.busy ? ' · analysing' : ''} · version ${esc(w.version || '?')}</li>`).join('');
+  box.innerHTML = `<h3>Analyse on another Mac</h3>
+    <p class="small muted" style="margin:0 0 10px">Both Macs sync the same OneDrive folder, with the experiments inside it. One Mac (say the Mac mini) does the analyses; the other sends them and both show the results.</p>
+    <div class="setrow"><div class="lbl"><span><strong style="color:var(--text)">Shared folder</strong></span><span style="word-break:break-all" title="${esc(r.shared || '')}">${r.shared ? esc(prettyCloud(r.shared)) : 'Not set'}${r.shared && !r.shared_ok ? ' (not found on this Mac)' : ''}</span></div>
+      <button class="btn sm" id="r-pick">${r.shared ? 'Change…' : 'Choose…'}</button></div>
+    <label class="toggle"><input type="checkbox" id="r-worker" ${r.worker ? 'checked' : ''} ${r.shared_ok ? '' : 'disabled'}><span class="t"><strong>Run analyses sent from my other Macs</strong><span>Turn this on for the Mac mini. While on, this Mac stays awake (the screen can still turn off or lock) and analyses what the other Macs send, one at a time. Leave Mitosight open: minimise it rather than closing it.</span></span></label>
+    ${r.worker ? `<div class="info" style="margin:6px 0 10px">${ICON.check}<span>On this Mac: in System Settings › Energy, turn on “Prevent automatic sleeping when the display is off”. In Finder, right-click the shared folder › “Always Keep on This Device”, so the images are on this Mac when it needs them.
+      <span style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap"><button class="btn sm" id="r-login">Open Mitosight when this Mac starts</button><span class="small muted" id="r-login-msg"></span></span></span></div>` : ''}
+    <div class="setrow"><div class="lbl"><label for="r-runon">Run analyses on</label><span>Experiments inside the shared folder are analysed on the chosen Mac; others stay on this Mac.</span></div>
+      <select class="input" id="r-runon" style="flex:0 0 220px" ${r.shared_ok ? '' : 'disabled'}><option value="here" ${r.run_on !== 'remote' ? 'selected' : ''}>This Mac</option><option value="remote" ${r.run_on === 'remote' ? 'selected' : ''}>${target ? esc(target.name) : 'The other Mac'}</option></select></div>
+    ${wl ? `<ul class="small" style="margin:8px 0 0;padding-left:18px;color:var(--text2)">${wl}</ul>` : r.shared_ok ? '<p class="small muted" style="margin:8px 0 0">No Mac has “Run analyses sent from my other Macs” on yet.</p>' : ''}`;
+  const save = async (patch) => { try { const n = await api('remote_prefs', patch); renderRemoteSettings(n); await refreshState(); if (S.view === 'experiment') render(); } catch (e) { fail(e); } };
+  $('#r-pick').onclick = async () => { try { const n = await api('pick_shared', {}); renderRemoteSettings(n); await refreshState(); } catch (e) { fail(e); } };
+  $('#r-worker').onchange = (ev) => save({ worker: ev.target.checked });
+  $('#r-runon').onchange = (ev) => save({ run_on: ev.target.value });
+  const lg = $('#r-login');
+  if (lg) lg.onclick = async () => { try { await api('login_item', {}); $('#r-login-msg').textContent = 'Done: Mitosight opens when this Mac starts.'; } catch (e) { $('#r-login-msg').textContent = e.message || String(e); } };
 }
 
 // ---------------------------------------------------------------- start

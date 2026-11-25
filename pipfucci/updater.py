@@ -75,7 +75,8 @@ def installed_versions() -> list[tuple[str, Path]]:
     return out
 
 
-PREFS_DEFAULT = {"auto_check": True, "auto_install": True, "workers": 0, "notify": True}
+PREFS_DEFAULT = {"auto_check": True, "auto_install": True, "workers": 0, "notify": True,
+                 "shared_folder": "", "run_on": "here", "worker": False}  # last three: analysing on another Mac
 
 
 def load_prefs() -> dict:
@@ -95,6 +96,12 @@ def save_prefs(patch: dict) -> dict:
     cur = load_prefs()
     for k, v in (patch or {}).items():
         if k in ("auto_check", "auto_install", "notify"):
+            cur[k] = bool(v)
+        elif k == "shared_folder":
+            cur[k] = str(v or "")
+        elif k == "run_on":
+            cur[k] = "remote" if v == "remote" else "here"
+        elif k == "worker":
             cur[k] = bool(v)
         elif k == "workers":
             try:

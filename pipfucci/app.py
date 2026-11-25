@@ -106,7 +106,7 @@ def watch_jobs(window, port: int) -> None:
             p = json.loads(urllib.request.urlopen(base + "/api/progress", timeout=5).read())
         except Exception:
             continue
-        long_job = p.get("job") in ("analysis", "retrack", "measure", "remask")
+        long_job = p.get("job") in ("analysis", "retrack", "measure", "remask", "remote")
         if p.get("running") and long_job:
             if p.get("job") == "analysis":
                 macos.request_notifications()
@@ -168,6 +168,9 @@ def serve_only(args) -> int:
     srv, port = serve(0)
     STATE.server = srv
     STATE.is_child = True
+    from .server import start_remote_worker
+
+    start_remote_worker()
     STATE.shell_pid = args.parent_pid or os.getppid()
     register_running()
     if args.folder:
@@ -229,6 +232,9 @@ def main(argv=None) -> int:
     srv, port = serve(args.port)
     STATE.server = srv
     STATE.shell_pid = os.getpid()
+    from .server import start_remote_worker
+
+    start_remote_worker()
     register_running()
     UPDATER.start()
     url = f"http://127.0.0.1:{port}/"

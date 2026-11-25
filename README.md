@@ -83,6 +83,20 @@ images become gaps (or, if a well has other fields at that time, the count is sc
 that remain) in every chart, figure and Prism table, and are marked `excluded` in the per-cell and
 per-track tables.
 
+**Analysing on another Mac (e.g. a Mac mini) through OneDrive:** both Macs sync the same OneDrive
+folder and the experiments live inside it. In Settings › *Analyse on another Mac*, choose that
+folder on both Macs. On the Mac mini turn on *Run analyses sent from my other Macs* (it then stays
+awake while Mitosight is open, also with the screen locked; set the folder to *Always Keep on This
+Device* in Finder and, in System Settings › Energy, *Prevent automatic sleeping when the display is
+off*; *Open Mitosight when this Mac starts* adds it to Login Items). On the MacBook set *Run
+analyses on* to the Mac mini: *Run analysis*, *Apply to all images* and debris re-measuring of
+experiments in that folder are then sent to the Mac mini, the MacBook shows its progress, and the
+results (written into the experiment folder) appear on both Macs. The MacBook can be closed or
+quit meanwhile; opening the experiment again picks the progress up. Requests, progress and each
+Mac's "I'm here" note are small files in "Mitosight jobs" inside the shared folder, each written by
+one Mac only so OneDrive never has to merge two versions. Experiments outside the shared folder are
+analysed on the Mac they are opened on.
+
 **Exporting annotated images for a paper or talk:** in Segment & gate, *Export image* saves the
 image on screen with the layers that are on (nucleus outlines coloured by phase, cell numbers,
 confluence area) plus time, scale bar, a label and an optional phase legend, drawn from the full
