@@ -681,7 +681,7 @@ def box_stats(q: dict) -> dict:
     from . import compare, stats
 
     exps = all_exps(need_results())
-    what = "colonies" if q.get("what") == "colonies" else "durations"
+    what = q.get("what") if q.get("what") in ("colonies", "arrest") else "durations"
     times = None
     if what == "colonies":
         ev = float(q["every"]) if q.get("every") else None
@@ -689,11 +689,13 @@ def box_stats(q: dict) -> dict:
         if q.get("times"):
             want = [float(x) for x in str(q["times"]).split(",") if x.strip()]
             times = [t for t in times if any(abs(t - w) < 1e-6 for w in want)] or times
-    res = stats.run(exps, what, q.get("unit") or "auto", q.get("control") or None, times)
+    cutoff = float(q["cutoff"]) if q.get("cutoff") else exps[0].settings.g1_arrest_h
+    res = stats.run(exps, what, q.get("unit") or "auto", q.get("control") or None, times, cutoff)
     if q.get("save"):
         import re
 
-        name = "Statistics - phase durations" if what == "durations" else "Statistics - colonies"
+        name = {"durations": "Statistics - phase durations", "colonies": "Statistics - colonies",
+                "arrest": "Statistics - G1 arrest"}[what]
         folder = need_results().results_dir / "figures"
         if q.get("folder"):  # "Export all": the same dated folder as the figures
             folder = folder / (re.sub(r"[^A-Za-z0-9 _().+-]+", "_", str(q["folder"])).strip() or "All graphs")

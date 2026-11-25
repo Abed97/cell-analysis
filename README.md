@@ -95,11 +95,23 @@ repeated-measures ANOVA (Greenhouse-Geisser) with Holm-adjusted paired t tests, 
 test; every cell, Kruskal-Wallis with Dunn's multiple comparisons (Holm), or Mann-Whitney.
 Summaries: median duration per well or experiment, mean colonies per image, median colony area;
 the well or experiment medians are drawn as diamonds. Brackets show stars or p values (*Hide
-ns*); colony box plots get one mark per time point (each tested separately). Under each figure:
+ns*); on the colony box plots every time point gets its own brackets (each time point is tested
+separately). Under each figure:
 the test, the comparisons with differences and 95% CIs, a methods paragraph to copy, and *Save
 table (CSV)*; *Export all* saves the tables with the figures. Only phases seen from start to end
 are included; how many were cut off by the start or end of the movie is shown, because long
 phases are cut off more often.
+
+**G1 arrest** (Figures › *Cells in G1 arrest*): the percent of cells that stay in G1 for at least
+the time set in the figure's header (22 h by default). A cell seen in G1 that long counts as
+arrested, also when its G1 began before the movie or was still going at the end; a cell whose
+whole G1 was seen and was shorter counts as not arrested; cells whose G1 was cut off (or that were
+lost) sooner cannot be judged and are left out, and their number is shown. Bars: percent of all
+judged cells with its Wilson 95% CI, or with wells/experiments as the unit, the mean of their
+percentages ± SEM with each as a diamond. Statistics use the same *Compare* choice: experiments or
+wells as above (ANOVA on the percentages), every cell: chi-square test with Holm-adjusted Fisher's
+exact tests (Fisher's exact test for two conditions), differences in percentage points with
+Newcombe 95% CIs.
 
 **Analysing on another Mac (e.g. a Mac mini) through OneDrive:** both Macs sync the same OneDrive
 folder and the experiments live inside it. In Settings › *Analyse on another Mac*, choose that

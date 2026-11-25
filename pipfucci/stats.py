@@ -37,7 +37,8 @@ PH = ("G1", "S", "G2M")
 PH_LABEL = {"G1": "G1", "S": "S", "G2M": "G2/M"}
 
 OBJ = {"durations": ("cells", "cell", "cells"), "count": ("images", "image", "images"),
-       "area": ("colonies", "colony", "colonies")}
+       "area": ("colonies", "colony", "colonies"), "arrest": ("cells", "cell", "cells")}
+MIN_JUDGED = 5     # a well or experiment needs this many cells with a known G1 outcome for a percent
 
 
 def stars(p) -> str:
@@ -108,6 +109,53 @@ def rank_tests(samples: list[np.ndarray], control: int | None) -> dict:
         out_pairs.append({"i": i, "j": j, "p": pa, "diff": float(np.median(samples[j]) - np.median(samples[i]))})
     return {"test": "Kruskal-Wallis test", "stat_label": f"H({k - 1})", "stat": float(h), "p": float(p),
             "post": "Dunn's multiple comparisons, Holm-adjusted", "pairs": out_pairs, "center": "median"}
+
+
+def _wilson(k: int, n: int, z: float = 1.959964) -> tuple[float, float]:
+    if n == 0:
+        return (float("nan"), float("nan"))
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (c - h, c + h)
+
+
+def _newcombe(k1: int, n1: int, k2: int, n2: int) -> list[float]:
+    """95% CI of p2 - p1 (Newcombe's hybrid score method), in percentage points."""
+    l1, u1 = _wilson(k1, n1)
+    l2, u2 = _wilson(k2, n2)
+    p1, p2 = k1 / n1, k2 / n2
+    d = p2 - p1
+    return [100 * (d - math.sqrt((p2 - l2) ** 2 + (u1 - p1) ** 2)), 100 * (d + math.sqrt((u2 - p2) ** 2 + (p1 - l1) ** 2))]
+
+
+def proportion_tests(counts: list[tuple[int, int]], control: int | None) -> dict:
+    """counts: (yes, total) per group. Chi-square test of the k x 2 table + Holm-adjusted Fisher's
+    exact tests per pair; Fisher's exact test for two groups. Differences in percentage points."""
+    k = len(counts)
+    pairs = _pairs(k, control)
+
+    def fisher(i, j):
+        (a, n1), (b, n2) = counts[i], counts[j]
+        return float(ss.fisher_exact([[a, n1 - a], [b, n2 - b]])[1])
+
+    out_pairs = []
+    raw = [fisher(i, j) for i, j in pairs]
+    adj = raw if k == 2 else holm(raw)
+    for (i, j), pa in zip(pairs, adj):
+        (a, n1), (b, n2) = counts[i], counts[j]
+        out_pairs.append({"i": i, "j": j, "p": pa, "diff": 100.0 * (b / n2 - a / n1), "ci": _newcombe(a, n1, b, n2)})
+    if k == 2:
+        return {"test": "Fisher's exact test", "stat_label": "", "stat": float("nan"), "p": raw[0], "post": None,
+                "pairs": out_pairs, "center": "percent"}
+    table = np.array([[a, n - a] for a, n in counts], float)
+    if (table.sum(axis=0) == 0).any():
+        chi, p, dof = 0.0, 1.0, k - 1
+    else:
+        chi, p, dof, _ = ss.chi2_contingency(table)
+    return {"test": "Chi-square test", "stat_label": f"χ²({dof})", "stat": float(chi), "p": float(p),
+            "post": "Fisher's exact tests, Holm-adjusted", "pairs": out_pairs, "center": "percent"}
 
 
 def mean_tests(samples: list[np.ndarray], control: int | None) -> dict:
@@ -206,7 +254,11 @@ def compare(groups: list[dict], unit: str, control_key: str | None, kind: str) -
         return res
     keys = [g["key"] for g in groups]
     control = keys.index(control_key) if control_key in keys else None
-    if unit == "objects":
+    if unit == "objects" and kind == "arrest":
+        samples = [np.asarray(g["obj"], float) for g in groups]
+        out = proportion_tests([(int(sum(g["obj"])), len(g["obj"])) for g in groups], control)
+        res["unit_label"] = obj_name
+    elif unit == "objects":
         samples = [np.asarray(g["obj"], float) for g in groups]
         out = rank_tests(samples, control)
         res["unit_label"] = obj_name
@@ -239,8 +291,15 @@ def compare(groups: list[dict], unit: str, control_key: str | None, kind: str) -
             units = [{"label": k, "v": float(v)} for k, v in g["exps"].items() if not res.get("paired") or k in common]
         res["groups"].append({"key": g["key"], "name": g["name"], "color": g.get("color"), "n": int(len(s)), "units": units,
                               "n_objects": int(len(g["obj"])), "median": float(np.median(s)),
-                              "mean": float(np.mean(s)), "sd": float(np.std(s, ddof=1)) if len(s) > 1 else None,
+                              "mean": float(np.mean(s)) * (100.0 if out["center"] == "percent" else 1.0),
+                              "sd": float(np.std(s, ddof=1)) if len(s) > 1 else None,
+                              "sem": float(np.std(s, ddof=1) / math.sqrt(len(s))) if len(s) > 1 else None,
                               "censored": g.get("censored")})
+        if kind == "arrest":
+            k_, n_ = int(sum(g["obj"])), len(g["obj"])
+            lo, hi = _wilson(k_, n_)
+            res["groups"][-1].update({"arrested": k_, "judged": n_, "unknown": g.get("unknown", 0),
+                                      "pooled": 100.0 * k_ / n_ if n_ else None, "wilson": [100 * lo, 100 * hi]})
     for pr in out["pairs"]:
         a, b = groups[pr["i"]], groups[pr["j"]]
         res["pairs"].append({"a": a["key"], "b": b["key"], "a_name": a["name"], "b_name": b["name"], "p": pr["p"],
@@ -248,7 +307,7 @@ def compare(groups: list[dict], unit: str, control_key: str | None, kind: str) -
     res["stars"] = stars(res["p"])
     res["ok"] = True
     if unit == "objects":
-        each = "Each cell is" if kind == "durations" else "Each image and each colony is"
+        each = "Each cell is" if kind in ("durations", "arrest") else "Each image and each colony is"
         res["notes"].append(f"{each} counted as independent, but those from one well are not: with many of them even "
                             "tiny differences come out significant. Use wells or experiments for the statistics you report.")
     elif unit == "wells":
@@ -286,6 +345,35 @@ def duration_groups(exps) -> dict:
         for p in PH:
             per[p]["exps"] = {k: float(np.median(v)) for k, v in exp_vals[p].items() if len(v) >= MIN_CELLS}
             out[p].append({"key": grp["key"], "name": grp["name"], "color": grp["color"], **per[p]})
+    return out
+
+
+def arrest_groups(exps, cutoff_h: float) -> list[dict]:
+    """Per condition: 1/0 for every cell whose G1 outcome is known (arrested or not), and the
+    percent arrested per well and per experiment (with at least MIN_JUDGED such cells)."""
+    from . import analysis as A
+    from .compare import exp_labels, groups
+
+    labels = exp_labels(exps)
+    lab = {id(e): n for e, n in zip(exps, labels)}
+    out = []
+    for grp in groups(exps):
+        obj, wells, unknown = [], {}, 0
+        per_exp: dict = {}
+        for e, ws in grp["members"]:
+            for w in ws:
+                r = A.g1_arrest_for(e, [w], cutoff_h)
+                yes, no = len(r["arrested"]), len(r["not"])
+                unknown += len(r["unknown"])
+                obj.extend([1] * yes + [0] * no)
+                tot = per_exp.setdefault(lab[id(e)], [0, 0])
+                tot[0] += yes
+                tot[1] += yes + no
+                if yes + no >= MIN_JUDGED:
+                    wells[_well_id(lab[id(e)], w, len(exps))] = 100.0 * yes / (yes + no)
+        exps_pct = {k: 100.0 * a / n for k, (a, n) in per_exp.items() if n >= MIN_JUDGED}
+        out.append({"key": grp["key"], "name": grp["name"], "color": grp["color"], "obj": obj, "wells": wells,
+                    "exps": exps_pct, "unknown": unknown})
     return out
 
 
@@ -344,18 +432,23 @@ def colony_groups(exps, times: list[float]) -> dict:
 
 
 # ------------------------------------------------------------ what the window asks for
-def run(exps, what: str, unit: str = "auto", control: str | None = None, times: list[float] | None = None) -> dict:
+def run(exps, what: str, unit: str = "auto", control: str | None = None, times: list[float] | None = None,
+        cutoff_h: float = 22.0) -> dict:
     import warnings
 
     with warnings.catch_warnings():  # scipy warns about near-identical values (durations come in whole frames)
         warnings.simplefilter("ignore", RuntimeWarning)
-        return _run(exps, what, unit, control, times)
+        return _run(exps, what, unit, control, times, cutoff_h)
 
 
-def _run(exps, what: str, unit: str, control: str | None, times: list[float] | None) -> dict:
+def _run(exps, what: str, unit: str, control: str | None, times: list[float] | None, cutoff_h: float = 22.0) -> dict:
     unit = unit if unit in ("auto", "objects", "wells", "experiments") else "auto"
     fams = []
-    if what == "durations":
+    if what == "arrest":
+        r = compare(arrest_groups(exps, cutoff_h), unit, control, "arrest")
+        r.update({"id": "arrest", "title": f"G1 arrest (G1 ≥ {cutoff_h:g} h)", "units_of": "%", "cutoff_h": cutoff_h})
+        fams.append(r)
+    elif what == "durations":
         dg = duration_groups(exps)
         for p in PH:
             r = compare(dg[p], unit, control, "durations")
@@ -383,7 +476,13 @@ def methods(what: str, fams: list[dict]) -> str:
     for (unit, test, post), fs in groups.items():
         ns = [g["n"] for f in fs for g in f["groups"]]
         nr = f"{min(ns)}" if min(ns) == max(ns) else f"{min(ns)}–{max(ns)}"
-        if what == "durations":
+        if what == "arrest":
+            cut = fs[0].get("cutoff_h", 22.0)
+            thing = f"The percentage of cells in G1 arrest (in G1 for at least {cut:g} h)"
+            per = {"objects": f"individual cells (n = {nr} cells per condition with a known G1 outcome)",
+                   "wells": f"the percentage of each well (n = {nr} wells per condition; wells with at least {MIN_JUDGED} cells with a known outcome)",
+                   "experiments": f"the percentage of each independent experiment (n = {nr} experiments)"}[unit]
+        elif what == "durations":
             names = [PH_LABEL[f["id"]] for f in fs]
             thing = (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]) + \
                 (" durations" if len(names) > 1 else " duration")
@@ -398,12 +497,18 @@ def methods(what: str, fams: list[dict]) -> str:
                    "wells": f"the mean colony number and median colony area of each well (n = {nr} wells per condition)",
                    "experiments": f"the mean colony number and median colony area of each independent experiment (n = {nr})"}[unit]
         lead = test[0].lower() + test[1:] if test.split()[0] in ("One-way", "Repeated-measures", "Paired") else test
-        sentence = f"{thing} {'were' if ' and ' in thing or what != 'durations' else 'was'} compared between conditions using {per}, by {lead}{f' followed by {post}' if post else ''}."
+        verb = "was" if what == "arrest" or (what == "durations" and " and " not in thing) else "were"
+        sentence = f"{thing} {verb} compared between conditions using {per}, by {lead}{f' followed by {post}' if post else ''}."
         if unit == "objects":
             sentence += (" Cells" if what == "durations" else " Images and colonies") + \
                 " from the same well were treated as independent, so these p values are descriptive."
         parts.append(sentence)
-    if what == "durations":
+    if what == "arrest":
+        cut = ok[0].get("cutoff_h", 22.0)
+        parts.insert(0, f"A cell counted as G1-arrested when it was seen in G1 for at least {cut:g} h, and as not "
+                        f"arrested when its whole G1 was seen and lasted less; cells whose G1 was cut off by the movie "
+                        f"or that were lost before {cut:g} h were left out.")
+    elif what == "durations":
         parts.insert(0, "Only phases observed from start to end within the movie were included.")
     else:
         parts.append("Each time point was tested separately.")
@@ -431,6 +536,17 @@ def to_csv(res: dict) -> str:
                 f"{pr['b_name']} vs {pr['a_name']}", f"{pr['diff']:.4g}",
                 "" if ci[0] is None else f"{ci[0]:.4g}", "" if ci[1] is None else f"{ci[1]:.4g}",
                 fmt_p(pr["p"]), pr["stars"], ns if i == 0 else "", " ".join(f["notes"]) if i == 0 else ""])
+    for f in res["families"]:
+        if f.get("ok") and f["groups"] and "arrested" in f["groups"][0]:
+            w.writerow([])
+            w.writerow(["Condition", "Arrested", "Judged", "% arrested", "95% CI low", "95% CI high", "Could not be judged",
+                        f"G1 for at least {f.get('cutoff_h', 22):g} h"])
+            for g in f["groups"]:
+                w.writerow([g["name"], g["arrested"], g["judged"], f"{g['pooled']:.2f}", f"{g['wilson'][0]:.2f}",
+                            f"{g['wilson'][1]:.2f}", g["unknown"]])
+            for g in f["groups"]:
+                for u in g.get("units") or []:
+                    w.writerow([g["name"], "", "", f"{u['v']:.2f}", "", "", "", u["label"]])
     w.writerow([])
     w.writerow(["Methods", res.get("methods", "")])
     return buf.getvalue()

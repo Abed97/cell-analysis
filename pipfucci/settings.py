@@ -87,6 +87,7 @@ class Settings:
     # statistics on the box plots: shown, unit (auto/objects/wells/experiments), control condition
     # (None = all pairs), label (stars/p), hide non-significant brackets
     stats_opts: dict = field(default_factory=lambda: dict(STATS_DEFAULT))
+    g1_arrest_h: float = 22.0  # a cell in G1 for at least this long counts as G1-arrested
     styles: dict = field(default_factory=dict)  # figure style per condition name: color, dashed, order, hidden
 
     # ---------- derived ----------
@@ -286,6 +287,10 @@ class Settings:
             so["label"] = "p" if v.get("label") == "p" else "stars"
             so["hide_ns"] = bool(v.get("hide_ns", so["hide_ns"]))
         self.stats_opts = so
+        try:
+            self.g1_arrest_h = float(min(1000.0, max(0.5, float(self.g1_arrest_h))))
+        except (TypeError, ValueError):
+            self.g1_arrest_h = 22.0
         if not isinstance(self.styles, dict):
             self.styles = {}
         if not isinstance(self.linked, list):

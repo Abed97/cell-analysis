@@ -112,3 +112,50 @@ def test_endpoint_saves_the_table(six_wells):
     r = server.box_stats({"what": "colonies", "every": "12", "save": "1", "folder": "../../etc"})
     assert Path(r["saved"]).parent.name == ".._.._etc" or ".." not in Path(r["saved"]).parent.name
     assert six_wells.results_dir in Path(r["saved"]).parents
+
+
+def test_proportion_tests_and_intervals():
+    from scipy import stats as ss
+
+    r = S.proportion_tests([(5, 40), (15, 38)], None)
+    assert r["test"] == "Fisher's exact test"
+    assert r["p"] == pytest.approx(ss.fisher_exact([[5, 35], [15, 23]])[1])
+    # Newcombe (1998), method 10, worked example: 56/70 vs 48/80 -> 0.0524 to 0.3339
+    assert S._newcombe(48, 80, 56, 70) == pytest.approx([5.24, 33.39], abs=0.01)
+    r3 = S.proportion_tests([(5, 40), (15, 38), (20, 30)], None)
+    assert r3["test"] == "Chi-square test" and r3["post"].startswith("Fisher") and len(r3["pairs"]) == 3
+    chi = ss.chi2_contingency([[5, 35], [15, 23], [20, 10]])
+    assert r3["p"] == pytest.approx(chi[1])
+
+
+def test_g1_arrest(six_wells):
+    from pipfucci import analysis as A
+
+    wells = ["B2", "B3", "B4"]
+    total = None
+    for cut in (0.5, 6.0, 12.0, 1000.0):
+        r = A.g1_arrest_for(six_wells, wells, cut)
+        n = len(r["arrested"]) + len(r["not"]) + len(r["unknown"])
+        total = total or n
+        assert n == total  # every G1 stretch is put somewhere, whatever the cutoff
+        if cut == 0.5:
+            assert len(r["not"]) == 0 and len(r["unknown"]) == 0  # everything seen in G1 lasted that long
+        if cut == 1000.0:
+            assert len(r["arrested"]) == 0
+    res = S.run([six_wells], "arrest", unit="objects", cutoff_h=6.0)
+    f = res["families"][0]
+    assert f["ok"] and f["test"] == "Fisher's exact test" and f["title"] == "G1 arrest (G1 ≥ 6 h)"
+    g = f["groups"][0]
+    assert g["judged"] == g["n"] and 0 <= g["pooled"] <= 100 and g["wilson"][0] <= g["pooled"] <= g["wilson"][1]
+    assert "at least 6 h" in res["methods"]
+
+
+def test_arrest_endpoint_uses_the_cutoff_setting(six_wells):
+    from pipfucci import server
+
+    server.STATE.exp = six_wells
+    six_wells.settings.update({"g1_arrest_h": 9})
+    r = server.box_stats({"what": "arrest", "save": "1"})
+    assert r["families"][0]["cutoff_h"] == 9 and Path(r["saved"]).name.startswith("Statistics - G1 arrest")
+    r = server.box_stats({"what": "arrest", "cutoff": "15"})
+    assert r["families"][0]["cutoff_h"] == 15

@@ -334,6 +334,35 @@ def durations_for(exp: Experiment, wells: list[str]) -> dict:
             "precision_h": ih}
 
 
+def g1_arrest_for(exp: Experiment, wells: list[str], cutoff_h: float) -> dict:
+    """Cells in G1 for at least cutoff_h hours (G1 arrest), among the cells whose G1 can be judged:
+    arrested = seen in G1 for >= cutoff (even if G1 started before the movie or was still going
+    at its end); not arrested = G1 seen from start to end and shorter; the rest (G1 cut off by
+    the movie, or the cell lost, before the cutoff) cannot be judged and is left out."""
+    t = exp.tracks
+    ex = exp.excluded_tracks()
+    c = _active(exp)
+    ih = exp.settings.interval_h
+    sel = t[t["well"].isin(wells) & ~t.index.isin(ex)]
+    sub = c[c["track"].isin(sel.index)].sort_values(["track", "frame"])
+    arrested, short, unknown = [], [], []
+    for key, g in sub.groupby("track", sort=False):
+        r = sel.loc[key]
+        segs = _segments(g["phase"].values, g["frame"].values)
+        for i, (p, a, b) in enumerate(segs):
+            if p != 0:
+                continue
+            hours = (b - a + 1) * ih
+            whole = (i > 0 or r["start_known"]) and (i < len(segs) - 1 or r["end_known"])
+            if hours >= cutoff_h - 1e-9:
+                arrested.append(key)
+            elif whole:
+                short.append(key)
+            else:
+                unknown.append(key)
+    return {"arrested": arrested, "not": short, "unknown": unknown}
+
+
 def durations_by_condition(exp: Experiment) -> dict:
     out = []
     for cnd in _conditions(exp):

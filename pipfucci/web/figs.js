@@ -223,7 +223,7 @@ function pairLabel(pr) { return statsOpts().label === 'p' ? pText(pr.p) : pr.sta
 
 // Brackets for the pairs of one family over boxes at x positions (by condition key), stacked so
 // that none overlaps; returns {levels, draw(yTop)}.
-function bracketLayout(fam, xOf) {
+function bracketLayout(fam, xOf, fs = 11, ownRow = false) {
   const o = statsOpts();
   if (!o.on || !fam || !fam.ok) return { levels: 0, draw: () => '' };
   const pairs = fam.pairs.filter((pr) => xOf[pr.a] != null && xOf[pr.b] != null && (!o.hide_ns || pr.p < 0.05))
@@ -231,7 +231,7 @@ function bracketLayout(fam, xOf) {
     .sort((u, v) => (u.x2 - u.x1) - (v.x2 - v.x1));
   const rows = [];
   pairs.forEach((pr) => {
-    let lv = 0;
+    let lv = ownRow ? rows.length : 0;
     while ((rows[lv] || []).some((q) => !(pr.x2 < q.x1 + 4 || pr.x1 > q.x2 - 4))) lv++;
     (rows[lv] = rows[lv] || []).push(pr);
     pr.level = lv;
@@ -242,7 +242,7 @@ function bracketLayout(fam, xOf) {
       const y = yBase - pr.level * 16;
       const tip = `${pr.b_name} vs ${pr.a_name}: ${pText(pr.p)} (${fam.post || fam.test})`;
       return `<g><title>${esc(tip)}</title><path d="M${r1(pr.x1)} ${r1(y + 4)}V${r1(y)}H${r1(pr.x2)}V${r1(y + 4)}" fill="none" stroke="#000" stroke-width="1"/>`
-        + `<text x="${r1((pr.x1 + pr.x2) / 2)}" y="${r1(y - 2.5)}" font-size="${o.label === 'p' ? 9.5 : 11}" text-anchor="middle" fill="#000">${esc(pairLabel(pr))}</text></g>`;
+        + `<text x="${r1((pr.x1 + pr.x2) / 2)}" y="${r1(y - 2.5)}" font-size="${o.label === 'p' ? fs - 1.5 : fs}" text-anchor="middle" fill="#000">${esc(ownRow ? pairLabel(pr).replace(/^p = /, '') : pairLabel(pr))}</text></g>`;
     }).join(''),
   };
 }
@@ -320,6 +320,61 @@ function figDurations(d, conds, st) {
   });
   s += `<text x="16" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 16 ${t + ph / 2})">Hours per observed stage</text>`;
   return { svg: s + '</svg>', panels };
+}
+
+// ---------------------------------------------------------------- G1 arrest (bars)
+function figArrest(st, conds) {
+  const fam = st && st.families ? st.families[0] : null;
+  const cut = fam ? fam.cutoff_h : num(S.st.experiment.settings.g1_arrest_h);
+  const byKey = fam && fam.groups ? Object.fromEntries(fam.groups.map((g) => [g.key, g])) : {};
+  const cs = conds.filter((c) => byKey[c.id]);
+  const longest = Math.max(4, ...cs.map((c) => Math.min(20, c.name.length)));
+  const cw = Math.max(70, Math.min(140, longest * 6.6 + 14)), l = 70, ph = 220, b = 70;
+  const pw = Math.max(160, cs.length * cw + 30);
+  const xOf = Object.fromEntries(cs.map((c, i) => [c.id, l + 15 + cw * (i + 0.5)]));
+  const so = statsOpts();
+  const lay = bracketLayout(fam, xOf);
+  const t = 34 + 14 + lay.levels * 16 + (lay.levels ? 6 : 0);
+  const W = l + pw + 20, H = t + ph + b;
+  let s = svgOpen(W, H, `Cells in G1 arrest, G1 at least ${cut} h`);
+  const panel = { type: 'box', x0: l, x1: l + pw, y0: t, y1: t + ph, boxes: [], dots: [], ring: '#111' };
+  if (!fam || !cs.length) return { svg: s + `<text x="${W / 2}" y="${H / 2}" font-size="12" text-anchor="middle" fill="#444">No cells to judge.</text></svg>`, panels: [] };
+  const reps = fam.ok && fam.unit !== 'objects';
+  const val = (g) => (reps ? g.mean : g.pooled);
+  const err = (g) => (reps ? (g.sem != null ? [g.mean - g.sem, g.mean + g.sem] : null) : g.wilson);
+  let mx = 10;
+  cs.forEach((c) => { const g = byKey[c.id]; mx = Math.max(mx, val(g) || 0, (err(g) || [0, 0])[1] || 0, ...(g.units || []).map((u) => u.v)); });
+  const auto = niceMax(Math.min(100, mx * 1.1), [10, 20, 25, 40, 50, 60, 80, 100]);
+  const stp = auto <= 25 ? 5 : auto <= 50 ? 10 : 20;
+  const autoTicks = []; for (let v = 0; v <= auto + 1e-6; v += stp) autoTicks.push(v);
+  const { ymin, ymax, ticks } = yRange({ ymax: auto, ticks: autoTicks });
+  const sy = (v) => t + ph - (Math.min(Math.max(v, ymin), ymax) - ymin) / (ymax - ymin) * ph;
+  s += yAxis(l, t, t + ph, ticks, sy) + `<path d="M${l} ${t + ph}H${l + pw}" stroke="#000"/>`;
+  s += `<text x="${l + pw / 2}" y="18" font-size="13" font-weight="700" text-anchor="middle" fill="#000">G1 arrest (G1 ≥ ${cut} h)</text>`;
+  if (so.on) s += `<text x="${l + pw / 2}" y="32" font-size="9.5" text-anchor="middle" fill="#444">${esc(omnibusText(fam))}${reps ? ` (◇ = ${fam.unit === 'wells' ? 'wells' : 'experiments'})` : ''}</text>`;
+  s += lay.draw(t - 8);
+  cs.forEach((c) => {
+    const g = byKey[c.id], cx = xOf[c.id], bw = cw * 0.56, v = val(g);
+    if (v != null) {
+      s += `<rect x="${r1(cx - bw / 2)}" y="${r1(sy(v))}" width="${r1(bw)}" height="${r1(sy(0) - sy(v))}" fill="${esc(c.color)}" fill-opacity="0.55" stroke="#000" stroke-width="1.2"/>`;
+      const e = err(g);
+      if (e) s += `<path d="M${r1(cx)} ${r1(sy(e[0]))}V${r1(sy(e[1]))}M${r1(cx - bw / 5)} ${r1(sy(e[0]))}H${r1(cx + bw / 5)}M${r1(cx - bw / 5)} ${r1(sy(e[1]))}H${r1(cx + bw / 5)}" stroke="#000" stroke-width="1.2" fill="none"/>`;
+    }
+    const m = (g.units || []).length;
+    (g.units || []).forEach((u, ui) => {
+      const x = cx + (m > 1 ? (ui / (m - 1) - 0.5) * bw * 0.7 : 0), y = sy(u.v);
+      s += `<path d="M${r1(x)} ${r1(y - 5.5)}L${r1(x + 5.5)} ${r1(y)}L${r1(x)} ${r1(y + 5.5)}L${r1(x - 5.5)} ${r1(y)}Z" fill="#FFFFFF" stroke="#000" stroke-width="1.5"/>`;
+      panel.dots.push({ x, y, text: `${c.name}: ${u.label} ${ixNum(u.v, 1)}% in G1 arrest` });
+    });
+    const info = `${c.name}: ${ixNum(g.pooled, 1)}% of cells in G1 for ≥ ${cut} h (${g.arrested} of ${g.judged}; 95% CI ${ixNum(g.wilson[0], 1)}–${ixNum(g.wilson[1], 1)}%)${reps ? `. Mean of ${g.n} ${fam.unit}: ${ixNum(g.mean, 1)}%` : ''}. ${g.unknown} cells could not be judged.`;
+    panel.boxes.push({ cx, half: cw / 2, name: c.name, color: c.color, stats: null, info });
+    const name = c.name.length > 20 ? c.name.slice(0, 19) + '…' : c.name;
+    s += `<text x="${r1(cx)}" y="${t + ph + 17}" font-size="11" text-anchor="middle" fill="${esc(c.color)}" font-weight="700">${esc(name)}<title>${esc(c.name)}</title></text>`
+      + `<text x="${r1(cx)}" y="${t + ph + 31}" font-size="10" text-anchor="middle" fill="#444">${g.arrested}/${g.judged} cells</text>`
+      + (reps ? `<text x="${r1(cx)}" y="${t + ph + 44}" font-size="10" text-anchor="middle" fill="#444">n = ${g.n} ${fam.unit}</text>` : '');
+  });
+  s += `<text x="18" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 18 ${t + ph / 2})">% of cells in G1 arrest</text>`;
+  return { svg: s + '</svg>', panels: [panel] };
 }
 
 // ---------------------------------------------------------------- lines over time, several panels
@@ -417,7 +472,7 @@ function figGrowth(pop, conds, zoom = null) {
 
 // ---------------------------------------------------------------- box plots over time (colonies)
 // One panel: groups of boxes at each time point, one box per condition.
-function boxTimePanel({ s0 = '', x0, t, pw, ph, theme, times, conds, key, log = false, title = '', ylabel = '', ax = null, marks = null }) {
+function boxTimePanel({ s0 = '', x0, t, pw, ph, theme, times, conds, key, log = false, title = '', ylabel = '', ax = null }) {
   const T = TH[theme];
   const nc = Math.max(1, conds.length), ng = Math.max(1, times.length);
   const gw = pw / ng, bw = Math.min(34, gw * 0.84 / nc);
@@ -458,13 +513,7 @@ function boxTimePanel({ s0 = '', x0, t, pw, ph, theme, times, conds, key, log = 
   s += `<path d="M${x0} ${t}V${t + ph}H${x0 + pw}" stroke="${T.axis}" fill="none"/>`;
   times.forEach((tt, ti) => { s += `<text x="${r1(x0 + (ti + 0.5) * gw)}" y="${t + ph + 16}" font-size="${T.fs + 1}" font-family="${T.font}" text-anchor="middle" fill="${T.text}">${ixNum(tt, 1)}</text>`; });
   s += `<text x="${x0 + pw / 2}" y="${t + ph + 34}" font-size="12" text-anchor="middle" fill="${T.sub}">Time (h)</text>`;
-  if (title) s += `<text x="${x0 + pw / 2}" y="${t - (marks ? 24 : 14)}" font-size="13" font-weight="700" text-anchor="middle" fill="${theme === 'pub' ? '#000' : T.sub}">${title}</text>`;
-  if (marks) times.forEach((tt, ti) => {
-    const m = marks[ti];
-    if (!m || !m.text) return;
-    const xa = x0 + ti * gw + gw / 2 - (nc - 1) / 2 * bw, xb = x0 + ti * gw + gw / 2 + (nc - 1) / 2 * bw;
-    s += `<g><title>${esc(m.tip)}</title>${nc > 1 ? `<path d="M${r1(xa)} ${t - 3}V${t - 7}H${r1(xb)}V${t - 3}" fill="none" stroke="${T.axis}" stroke-width="1"/>` : ''}<text x="${r1((xa + xb) / 2)}" y="${t - 9.5}" font-size="${m.small ? 8.5 : 10.5}" text-anchor="middle" fill="${T.text}">${esc(m.text)}</text></g>`;
-  });
+  if (title) s += `<text x="${x0 + pw / 2}" y="${t - 14}" font-size="13" font-weight="700" text-anchor="middle" fill="${theme === 'pub' ? '#000' : T.sub}">${title}</text>`;
   if (ylabel) s += `<text x="${x0 - 46}" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="${T.sub}" transform="rotate(-90 ${x0 - 46} ${t + ph / 2})">${ylabel}</text>`;
   const panel = { type: 'box', x0, x1: x0 + pw, y0: t, y1: t + ph, boxes: [], dots: [], ring: T.ring };
   const rnd = seeded(11);
@@ -504,32 +553,38 @@ function colonyBoxChart(dist, conds, key, log) {
 }
 
 // Figures page: both colony box plots side by side
-// One marker per time point: the test across conditions there (stars or p), for the colony box plots.
-function colonyMarks(st, measure, times) {
+// Pairwise brackets inside each time point of a colony box panel (each time point is its own test).
+function colonyBrackets(st, measure, times, conds, x0, pw) {
   const o = statsOpts();
-  if (!o.on || !st || !st.families) return null;
-  return times.map((tt) => {
+  if (!o.on || !st || !st.families) return { levels: 0, draw: () => '' };
+  const nc = Math.max(1, conds.length), ng = Math.max(1, times.length);
+  const gw = pw / ng, bw = Math.min(34, gw * 0.84 / nc);
+  const lays = times.map((tt, ti) => {
     const f = st.families.find((x) => x.measure === measure && Math.abs(x.time - tt) < 1e-6);
-    if (!f || !f.ok) return null;
-    if (o.hide_ns && !(f.p < 0.05)) return null;
-    const pairs = f.pairs.filter((pr) => pr.p < 0.05).map((pr) => `${pr.b_name} vs ${pr.a_name} ${pr.stars}`).join('; ');
-    return { text: o.label === 'p' ? pText(f.p).replace(/^p = /, '') : f.stars, small: o.label === 'p',
-      tip: `${f.title}: ${f.test}, ${pText(f.p)}${pairs ? `. ${f.post || ''}: ${pairs}` : ''}` };
+    const xOf = Object.fromEntries(conds.map((c, ci) => [c.id, x0 + ti * gw + gw / 2 + (ci - (nc - 1) / 2) * bw]));
+    return bracketLayout(f, xOf, 9.5, o.label === 'p' && nc > 2);
   });
+  return { levels: Math.max(0, ...lays.map((l) => l.levels)), draw: (y) => lays.map((l) => l.draw(y)).join('') };
 }
 
 function figColonyBoxes(dist, conds, log, st) {
   const ng = Math.max(1, dist.times.length), nc = Math.max(1, conds.length);
-  const pw = Math.max(320, Math.min(620, ng * (nc * 16 + 14))), ph = 210, l = 66, gap = 80;
-  const mc = colonyMarks(st, 'count', dist.times), ma = colonyMarks(st, 'area', dist.times);
-  const t = 40 + conds.length * 16 + (mc || ma ? 12 : 0);
+  const room = statsOpts().on && st && nc > 1 ? 26 : 16;  // wider time groups so bracket labels fit
+  const pw = Math.max(320, Math.min(760, ng * (nc * room + 14))), ph = 210, l = 66, gap = 80;
+  const x2 = l + pw + gap;
+  const bc = colonyBrackets(st, 'count', dist.times, conds, l, pw), ba = colonyBrackets(st, 'area', dist.times, conds, x2, pw);
+  const levels = Math.max(bc.levels, ba.levels);
+  const titleY = 34 + nc * 16 + 8;                   // the legend sits above the titles
+  const t = titleY + 12 + levels * 16 + (levels ? 8 : 0);
   const W = l + 2 * pw + gap + 16, H = t + ph + 52;
   let s = svgOpen(W, H, 'Colonies over time, box plots');
-  const a = boxTimePanel({ x0: l, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'counts', title: 'Colony number', ylabel: 'Colonies per image', ax: 'y0', marks: mc });
-  const b = boxTimePanel({ x0: l + pw + gap, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'areas', log, title: `Colony area${log ? ' (log scale)' : ''}`, ylabel: 'Colony area (µm²)', ax: 'y1', marks: ma });
-  s += a.s + b.s;
+  const a = boxTimePanel({ x0: l, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'counts', title: '', ylabel: 'Colonies per image', ax: 'y0' });
+  const b = boxTimePanel({ x0: x2, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'areas', log, title: '', ylabel: 'Colony area (µm²)', ax: 'y1' });
+  s += `<text x="${l + pw / 2}" y="${titleY}" font-size="13" font-weight="700" text-anchor="middle" fill="#000">Colony number</text>`
+    + `<text x="${x2 + pw / 2}" y="${titleY}" font-size="13" font-weight="700" text-anchor="middle" fill="#000">Colony area${log ? ' (log scale)' : ''}</text>`;
+  s += bc.draw(t - 8) + ba.draw(t - 8);  s += a.s + b.s;
   // legend (boxes)
-  conds.forEach((c, j) => { const y = 36 + j * 16; s += `<rect x="${l + 8}" y="${y - 10}" width="14" height="11" fill="${esc(c.color)}" fill-opacity="0.35" stroke="#000"/><text x="${l + 28}" y="${y}" font-size="11" fill="#000">${esc(shortName(c.name))}</text>`; });
+  conds.forEach((c, j) => { const y = 24 + j * 16; s += `<rect x="${l + 8}" y="${y - 10}" width="14" height="11" fill="${esc(c.color)}" fill-opacity="0.35" stroke="#000"/><text x="${l + 28}" y="${y}" font-size="11" fill="#000">${esc(shortName(c.name, 40))}</text>`; });
   return { svg: s + '</svg>', panels: [a.panel, b.panel] };
 }
 
@@ -611,9 +666,14 @@ function statsQuery(what) {
 
 async function loadStats(ctx) {
   const o = statsOpts();
-  if (!o.on) { ctx.stDur = null; ctx.stCol = null; return; }
-  const [a, b] = await Promise.all([api(statsQuery('durations')).catch(() => null), api(statsQuery('colonies')).catch(() => null)]);
-  ctx.stDur = a; ctx.stCol = b;
+  if (!o.on) {  // the arrest percentages are needed for their figure either way
+    ctx.stDur = null; ctx.stCol = null;
+    ctx.stArr = await api(statsQuery('arrest')).catch(() => null);
+    return;
+  }
+  const [a, b, c] = await Promise.all([api(statsQuery('durations')).catch(() => null), api(statsQuery('colonies')).catch(() => null),
+    api(statsQuery('arrest')).catch(() => null)]);
+  ctx.stDur = a; ctx.stCol = b; ctx.stArr = c;
 }
 
 async function figData(force = false) {
@@ -644,7 +704,7 @@ function figDefs(ctx) {
 }
 
 function figDefsRaw(ctx) {
-  const { d, pop, dist, stDur, stCol } = ctx;
+  const { d, pop, dist, stDur, stCol, stArr } = ctx;
   const shown = d.conditions.filter((c) => !c.hidden && c.n > 0);
   const shownAll = d.conditions.filter((c) => !c.hidden);
   const byId = Object.fromEntries((dist.conditions || []).map((c) => [c.id, c]));
@@ -661,6 +721,9 @@ function figDefsRaw(ctx) {
     { id: 'fig-b', title: 'Time spent in each phase', ok: shown.length, clickable: true,
       sub: 'Hours in each phase, for phases seen from start to end inside the movie. One dot per cell per phase; boxes show the median and quartiles, whiskers 1.5 × IQR. Every value is ± one frame interval.',
       axes: [{ k: 'y', label: 'Hours per observed stage' }], build: () => figDurations(d, shown, stDur), stats: 'durations', st: stDur },
+    { id: 'fig-h', title: 'Cells in G1 arrest', ok: shown.length && stArr, arrest: true,
+      sub: `A cell counts as G1-arrested when it stays in G1 for at least the time set here, including cells still in G1 when the movie ends. It counts as not arrested when its whole G1 is seen and is shorter. Cells whose G1 is cut off by the movie (or that are lost) before that time cannot be judged and are left out. Bars: percent of all judged cells, with its 95% CI; with wells or experiments as the unit, the mean of their percentages ± SEM, each one a diamond.`,
+      axes: [{ k: 'y', label: '% of cells in G1 arrest' }], build: () => figArrest(stArr, shown), stats: 'arrest', st: stArr },
     { id: 'fig-c', title: 'Phase fractions of the followed cells', time: true, ok: shown.length,
       sub: 'Percent of the followed cells in each phase, per condition (the same cells as the composition figure).',
       axes: [AX_TIME, AX_PCT], build: (z) => figFractions(d, shown, z) },
@@ -687,6 +750,12 @@ function figDefsRaw(ctx) {
   ];
 }
 
+function arrestControls() {
+  const v = num(S.st.experiment.settings.g1_arrest_h);
+  return `<label class="small muted" for="arr-cut" style="white-space:nowrap">Arrested if in G1 for at least</label>
+    <span class="unit-input" style="width:104px"><input type="number" id="arr-cut" min="0.5" max="1000" step="0.5" value="${v}" aria-label="G1 arrest cutoff in hours"><span>h</span></span>`;
+}
+
 function colonyControls() {
   const st = S.fig.colStyle === 'box';
   const everyOpts = [['', 'Auto'], ['1', '1 h'], ['2', '2 h'], ['3', '3 h'], ['6', '6 h'], ['12', '12 h'], ['24', '24 h'], ['48', '48 h']];
@@ -700,7 +769,7 @@ function figSection(def) {
     : '<p style="color:#444;padding:20px">No conditions to show. Assign wells on the plate map (step 1) or tick “Show” above.</p>';
   const body = def.scatter ? '<p style="color:#444;padding:20px">Loading…</p>' : def.ok ? ixChart(def.build, { group: def.id }) : empty;
   return `<section class="card" aria-labelledby="${def.id}-h"><div class="card-head"><div><h2 id="${def.id}-h">${def.title}</h2><p>${def.sub}</p></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">${def.colonies ? colonyControls() : ''}${def.scatter ? scatterControls() : ''}${def.axes && def.axes.length ? `<button type="button" class="btn sm" data-axes="${def.id}" aria-expanded="${!!S.fig.axOpen[def.id]}">Axes${axSet(def.id) ? ' ·  set' : ''}</button>` : ''}${magControls(def.id)}<button class="btn" data-save="${def.id}" data-name="${esc(def.title)}">${ICON.down} Save PNG + SVG</button></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">${def.arrest ? arrestControls() : ''}${def.colonies ? colonyControls() : ''}${def.scatter ? scatterControls() : ''}${def.axes && def.axes.length ? `<button type="button" class="btn sm" data-axes="${def.id}" aria-expanded="${!!S.fig.axOpen[def.id]}">Axes${axSet(def.id) ? ' ·  set' : ''}</button>` : ''}${magControls(def.id)}<button class="btn" data-save="${def.id}" data-name="${esc(def.title)}">${ICON.down} Save PNG + SVG</button></div></div>
     ${def.axes && S.fig.axOpen[def.id] ? axesEditor(def) : ''}
     ${def.stats && def.ok ? statsControls(def) : ''}
     <div class="fig-card" id="${def.id}" data-mag="${S.fig.mag[def.id] || 0}">${body}</div>
@@ -708,7 +777,7 @@ function figSection(def) {
     ${def.stats && def.ok && statsOpts().on ? statsTable(def.st, def.stats) : ''}</section>`;
 }
 
-const UNIT_NAME = { durations: 'Each cell', colonies: 'Each image / colony' };
+const UNIT_NAME = { durations: 'Each cell', colonies: 'Each image / colony', arrest: 'Each cell' };
 
 function statsControls(def) {
   const o = statsOpts();
@@ -736,15 +805,19 @@ function statsTable(st, what) {
   const fams = st.families;
   const famHTML = (f) => {
     if (!f.ok) return `<div class="st-fam"><strong>${esc(f.title)}</strong> <span class="small muted">${esc(f.why || '')}</span></div>`;
-    const ctr = f.center === 'mean' ? 'mean' : 'median';
-    const groups = f.groups.map((g) => `${esc(g.name)} ${num(f.center === 'mean' ? g.mean : g.median)}${unitsOf(f)} (n = ${g.n})`).join(' · ');
+    const ctr = f.center === 'mean' ? 'mean' : f.center === 'percent' ? 'percent' : 'median';
+    const groups = f.groups.map((g) => `${esc(g.name)} ${num(f.center === 'median' ? g.median : g.mean)}${unitsOf(f)} (n = ${g.n})`).join(' · ');
     const rows = f.pairs.map((pr) => `<tr><td>${esc(pr.b_name)} vs ${esc(pr.a_name)}</td><td class="mono">${pr.diff >= 0 ? '+' : ''}${num(pr.diff)}${unitsOf(f)}</td><td class="mono">${pr.ci ? `${num(pr.ci[0])} to ${num(pr.ci[1])}` : '–'}</td><td class="mono">${esc(pText(pr.p).replace(/^p = /, '').replace(/^p /, ''))}</td><td><strong>${esc(pr.stars)}</strong></td></tr>`).join('');
     return `<div class="st-fam"><div><strong>${esc(f.title)}</strong> · ${esc(f.test)}, ${esc(f.stat_label)} = ${num(f.stat)}, ${esc(pText(f.p))} <strong>${esc(f.stars)}</strong>${f.post ? ` · ${esc(f.post)}` : ''}</div>
-      <div class="small muted">${esc(f.unit_label)}: ${ctr}s ${groups}</div>
-      <table class="st-table"><thead><tr><th>Comparison</th><th>Difference (${ctr})</th><th>95% CI</th><th>${f.pairs.length > 1 ? 'Adjusted p' : 'p'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      <div class="small muted">${esc(f.unit_label)}: ${ctr === 'percent' ? 'percent' : ctr + 's'} ${groups}</div>
+      <table class="st-table"><thead><tr><th>Comparison</th><th>Difference (${ctr === 'percent' ? 'percentage points' : ctr})</th><th>95% CI</th><th>${f.pairs.length > 1 ? 'Adjusted p' : 'p'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   };
   let body;
-  if (what === 'colonies') {
+  if (what === 'arrest') {
+    const f = fams[0];
+    const cnt = (f.groups || []).map((g) => `<tr><td>${esc(g.name)}</td><td class="mono">${g.arrested}</td><td class="mono">${g.judged}</td><td class="mono">${num(g.pooled)}% <span class="muted">(${num(g.wilson[0])}–${num(g.wilson[1])})</span></td><td class="mono">${g.unknown}</td></tr>`).join('');
+    body = `<table class="st-table"><thead><tr><th>Condition</th><th>Arrested</th><th>Judged</th><th>% arrested (95% CI)</th><th>Could not be judged</th></tr></thead><tbody>${cnt}</tbody></table>` + fams.map(famHTML).join('');
+  } else if (what === 'colonies') {
     const by = (m) => fams.filter((f) => f.measure === m);
     body = [['count', 'Colonies per image'], ['area', 'Colony area']].map(([m, name]) => `<details class="st-sub"><summary>${name}: ${by(m).filter((f) => f.ok && f.p < 0.05).length} of ${by(m).length} time points differ (p < 0.05)</summary>${by(m).map(famHTML).join('')}</details>`).join('');
   } else body = fams.map(famHTML).join('');
@@ -916,11 +989,18 @@ function bindFigures(d) {
     if (k === 'unit' && !o.unit) o.unit = 'auto';
     try { const r = await api('settings', { stats_opts: o }); S.st = r.state; markSaved(); } catch (err) { return fail(err); }
     try { await loadStats(S.fig.ctx); } catch (err) { return fail(err); }
-    rerenderFig('fig-b'); rerenderFig('fig-d');
+    rerenderFig('fig-b'); rerenderFig('fig-h'); rerenderFig('fig-d');
   });
+  const ac = $('#arr-cut');
+  if (ac) ac.onchange = async () => {
+    const v = parseFloat(ac.value);
+    if (!(v >= 0.5 && v <= 1000)) return toast('Enter a time between 0.5 and 1000 h.', { bad: true });
+    try { const r = await api('settings', { g1_arrest_h: v }); S.st = r.state; markSaved(); await loadStats(S.fig.ctx); } catch (err) { return fail(err); }
+    rerenderFig('fig-h');
+  };
   $$('[data-stbox]').forEach((det) => det.ontoggle = () => { S.fig.stOpen = { ...(S.fig.stOpen || {}), [det.dataset.stbox]: det.open }; });
   $$('[data-stcopy]').forEach((b) => b.onclick = async () => {
-    const st = b.dataset.stcopy === 'colonies' ? S.fig.ctx.stCol : S.fig.ctx.stDur;
+    const st = { colonies: S.fig.ctx.stCol, arrest: S.fig.ctx.stArr }[b.dataset.stcopy] || S.fig.ctx.stDur;
     try { await navigator.clipboard.writeText(st.methods); toast('Methods text copied.'); } catch (err) { toast('Select the text and copy it with ⌘C.'); }
   });
   $$('[data-stsave]').forEach((b) => b.onclick = async () => {
@@ -1013,6 +1093,7 @@ async function exportAll(btn) {
     if (statsOpts().on && last) {
       await api(statsQuery('durations') + `&save=1&folder=${encodeURIComponent(folder)}`).catch(() => null);
       await api(statsQuery('colonies') + `&save=1&folder=${encodeURIComponent(folder)}`).catch(() => null);
+      await api(statsQuery('arrest') + `&save=1&folder=${encodeURIComponent(folder)}`).catch(() => null);
     }
     if (last) toast(`Exported ${n} graphs and figures (PNG + SVG)${statsOpts().on ? ' and the statistics tables' : ''}.`, { action: { label: 'Show in Finder', fn: () => api('reveal', { path: last.folder }).catch(fail) }, ms: 15000 });
   } catch (e) { fail(e); }
