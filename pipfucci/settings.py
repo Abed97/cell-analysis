@@ -13,6 +13,7 @@ import numpy as np
 DEFAULT_COLORS = ["#7AB0FF", "#F59E5B", "#C59BFF", "#5FD4C4", "#F27FB2", "#B8C46A", "#A0A8B2"]
 
 
+STATS_DEFAULT = {"on": True, "unit": "auto", "control": None, "label": "stars", "hide_ns": True}
 REMOVED_KINDS = ("object", "track", "patch")
 MAX_REMOVED = 20000
 
@@ -83,6 +84,9 @@ class Settings:
     removed: list = field(default_factory=list)
     scatter_hours: list = field(default_factory=list)  # time points of the red-vs-green plots; empty = automatic
     fig_axes: dict = field(default_factory=dict)  # figure axes set by hand: {figure: {axis: {min, max, step}}}
+    # statistics on the box plots: shown, unit (auto/objects/wells/experiments), control condition
+    # (None = all pairs), label (stars/p), hide non-significant brackets
+    stats_opts: dict = field(default_factory=lambda: dict(STATS_DEFAULT))
     styles: dict = field(default_factory=dict)  # figure style per condition name: color, dashed, order, hidden
 
     # ---------- derived ----------
@@ -273,6 +277,15 @@ class Settings:
             if out:
                 axes[str(fig)] = out
         self.fig_axes = axes
+        so = dict(STATS_DEFAULT)
+        if isinstance(self.stats_opts, dict):
+            v = self.stats_opts
+            so["on"] = bool(v.get("on", so["on"]))
+            so["unit"] = v.get("unit") if v.get("unit") in ("auto", "objects", "wells", "experiments") else "auto"
+            so["control"] = str(v["control"])[:200] if v.get("control") else None
+            so["label"] = "p" if v.get("label") == "p" else "stars"
+            so["hide_ns"] = bool(v.get("hide_ns", so["hide_ns"]))
+        self.stats_opts = so
         if not isinstance(self.styles, dict):
             self.styles = {}
         if not isinstance(self.linked, list):

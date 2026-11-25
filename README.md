@@ -83,6 +83,24 @@ images become gaps (or, if a well has other fields at that time, the count is sc
 that remain) in every chart, figure and Prism table, and are marked `excluded` in the per-cell and
 per-track tables.
 
+**Statistics on the box plots** (Figures page: *Time spent in each phase*, and *Colonies over
+time* as box plots). *Compare* sets what counts as one sample. *Automatic* takes independent
+experiments (biological replicates, from Compare experiments) when every condition has at least
+3, else wells (technical replicates) when every condition has at least 3 (wells with at least 5
+complete phases; for colonies, at least 3 colonies), else every cell, image or colony (labelled
+descriptive, because cells from one well are not independent). Tests, as in Prism: experiments or
+wells, one-way ANOVA with Tukey's (all pairs) or Dunnett's (each vs a control) multiple
+comparisons, Welch's t test for two conditions; experiments that all contain every condition,
+repeated-measures ANOVA (Greenhouse-Geisser) with Holm-adjusted paired t tests, or a paired t
+test; every cell, Kruskal-Wallis with Dunn's multiple comparisons (Holm), or Mann-Whitney.
+Summaries: median duration per well or experiment, mean colonies per image, median colony area;
+the well or experiment medians are drawn as diamonds. Brackets show stars or p values (*Hide
+ns*); colony box plots get one mark per time point (each tested separately). Under each figure:
+the test, the comparisons with differences and 95% CIs, a methods paragraph to copy, and *Save
+table (CSV)*; *Export all* saves the tables with the figures. Only phases seen from start to end
+are included; how many were cut off by the start or end of the movie is shown, because long
+phases are cut off more often.
+
 **Analysing on another Mac (e.g. a Mac mini) through OneDrive:** both Macs sync the same OneDrive
 folder and the experiments live inside it. In Settings › *Analyse on another Mac*, choose that
 folder on both Macs. On the Mac mini turn on *Run analyses sent from my other Macs* (it then stays

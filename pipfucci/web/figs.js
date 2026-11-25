@@ -211,12 +211,61 @@ function figPopComposition(pop, conds, zoom = null) {
   return { svg: s + '</svg>', panels };
 }
 
+// ---------------------------------------------------------------- statistics on box plots
+function statsOpts() { return { on: true, unit: 'auto', control: null, label: 'stars', hide_ns: true, ...((S.st.experiment.settings || {}).stats_opts || {}) }; }
+
+function pText(p) {
+  if (p == null || !isFinite(p)) return '–';
+  return p < 1e-4 ? 'p < 0.0001' : `p = ${p < 0.01 ? p.toFixed(4) : p.toFixed(3)}`;
+}
+
+function pairLabel(pr) { return statsOpts().label === 'p' ? pText(pr.p) : pr.stars; }
+
+// Brackets for the pairs of one family over boxes at x positions (by condition key), stacked so
+// that none overlaps; returns {levels, draw(yTop)}.
+function bracketLayout(fam, xOf) {
+  const o = statsOpts();
+  if (!o.on || !fam || !fam.ok) return { levels: 0, draw: () => '' };
+  const pairs = fam.pairs.filter((pr) => xOf[pr.a] != null && xOf[pr.b] != null && (!o.hide_ns || pr.p < 0.05))
+    .map((pr) => ({ ...pr, x1: Math.min(xOf[pr.a], xOf[pr.b]), x2: Math.max(xOf[pr.a], xOf[pr.b]) }))
+    .sort((u, v) => (u.x2 - u.x1) - (v.x2 - v.x1));
+  const rows = [];
+  pairs.forEach((pr) => {
+    let lv = 0;
+    while ((rows[lv] || []).some((q) => !(pr.x2 < q.x1 + 4 || pr.x1 > q.x2 - 4))) lv++;
+    (rows[lv] = rows[lv] || []).push(pr);
+    pr.level = lv;
+  });
+  return {
+    levels: rows.length,
+    draw: (yBase) => pairs.map((pr) => {
+      const y = yBase - pr.level * 16;
+      const tip = `${pr.b_name} vs ${pr.a_name}: ${pText(pr.p)} (${fam.post || fam.test})`;
+      return `<g><title>${esc(tip)}</title><path d="M${r1(pr.x1)} ${r1(y + 4)}V${r1(y)}H${r1(pr.x2)}V${r1(y + 4)}" fill="none" stroke="#000" stroke-width="1"/>`
+        + `<text x="${r1((pr.x1 + pr.x2) / 2)}" y="${r1(y - 2.5)}" font-size="${o.label === 'p' ? 9.5 : 11}" text-anchor="middle" fill="#000">${esc(pairLabel(pr))}</text></g>`;
+    }).join(''),
+  };
+}
+
+function omnibusText(fam) {
+  if (!fam || !fam.ok) return fam && fam.why ? fam.why : '';
+  const unit = { cells: 'cells', images: 'images', colonies: 'colonies', wells: 'wells', experiments: 'experiments' }[fam.unit_label] || fam.unit_label;
+  return `${fam.test.replace(' (Greenhouse-Geisser)', '')}, ${pText(fam.p)} · n = ${fam.groups.map((g) => g.n).join(', ')} ${unit}`;
+}
+
 // ---------------------------------------------------------------- B: durations (box + dots)
-function figDurations(d, conds) {
+function figDurations(d, conds, st) {
   const phases = [['G1', 'G1 duration'], ['S', 'S duration'], ['G2M', 'G2/M duration']];
   const longest = Math.max(4, ...conds.map((c) => Math.min(18, c.name.length)));
-  const cw = Math.max(58, Math.min(124, longest * 6.4 + 12)), l = 62, t = 34, ph = 200, gap = 40, b = 64;
+  const cw = Math.max(58, Math.min(124, longest * 6.4 + 12)), l = 62, ph = 200, gap = 40, b = 64;
   const pw = Math.max(120, conds.length * cw + 20);
+  const fams = Object.fromEntries(((st && st.families) || []).map((f) => [f.id, f]));
+  const so = statsOpts();
+  const cxOf = (pi, ci) => l + pi * (pw + gap) + 10 + cw * (ci + 0.5) + (pw - 20 - conds.length * cw) / 2;
+  const layouts = phases.map(([k], pi) => bracketLayout(fams[k], Object.fromEntries(conds.map((c, ci) => [c.id, cxOf(pi, ci)]))));
+  const levels = Math.max(0, ...layouts.map((x) => x.levels));
+  const showTest = so.on && st && st.families && st.families.length;
+  const t = 34 + (showTest ? 14 : 0) + levels * 16 + (levels ? 6 : 0);
   const W = l + phases.length * pw + (phases.length - 1) * gap + 16, H = t + ph + b;
   let s = svgOpen(W, H, 'Hours per observed stage');
   const rnd = seeded(7);
@@ -231,10 +280,12 @@ function figDurations(d, conds) {
     const { ymin, ymax, ticks } = yRange({ ymax: autoMax, ticks: autoTicks });
     const sy = (v) => t + ph - (Math.min(Math.max(v, ymin), ymax) - ymin) / (ymax - ymin) * ph;
     s += yAxis(x0, t, t + ph, ticks, sy) + `<path d="M${x0} ${t + ph}H${x0 + pw}" stroke="#000"/>`;
-    s += `<text x="${x0 + pw / 2}" y="${t - 14}" font-size="13" font-weight="700" text-anchor="middle" fill="#000">${title}</text>`;
+    s += `<text x="${x0 + pw / 2}" y="18" font-size="13" font-weight="700" text-anchor="middle" fill="#000">${title}</text>`;
+    if (showTest) s += `<text x="${x0 + pw / 2}" y="32" font-size="9.5" text-anchor="middle" fill="#444">${esc(omnibusText(fams[k]))}${fams[k] && fams[k].ok && fams[k].unit !== 'objects' ? ` (◇ = ${fams[k].unit === 'wells' ? 'well' : 'experiment'} medians)` : ''}</text>`;
+    s += layouts[pi].draw(t - 8);
     const panel = { type: 'box', x0, x1: x0 + pw, y0: t, y1: t + ph, boxes: [], dots: [], ring: '#111' };
     conds.forEach((c, ci) => {
-      const cx = x0 + 10 + cw * (ci + 0.5) + (pw - 20 - conds.length * cw) / 2;
+      const cx = cxOf(pi, ci);
       const keys = (c.duration_keys || {})[k] || [];
       const pairs = (c.durations[k] || []).map((v, i) => [v, keys[i] || null]).sort((a, b2) => a[0] - b2[0]);
       const vals = pairs.map((p) => p[0]);
@@ -249,6 +300,17 @@ function figDurations(d, conds) {
           panel.dots.push({ x, y, key, text: `${c.name}: ${CAT_LABEL[k]} lasted ${hrs(v)}${key ? ` (cell ${key.split('-').pop()}, ${key.split('-')[0]})` : ''}` });
         });
         s += `<path d="M${r1(cx - bw / 2)} ${r1(sy(stt.med))}H${r1(cx + bw / 2)}" stroke="#000" stroke-width="2.2"/>`;
+        // the values the statistics compare (one per well or experiment), SuperPlot style
+        const fam = so.on && fams[k] && fams[k].ok ? fams[k] : null;
+        const gr = fam && fam.groups.find((x) => x.key === c.id);
+        if (gr && gr.units && gr.units.length) {
+          const m = gr.units.length;
+          gr.units.forEach((u, ui) => {
+            const x = cx + (m > 1 ? (ui / (m - 1) - 0.5) * bw * 0.7 : 0), y = sy(u.v);
+            s += `<path d="M${r1(x)} ${r1(y - 6)}L${r1(x + 6)} ${r1(y)}L${r1(x)} ${r1(y + 6)}L${r1(x - 6)} ${r1(y)}Z" fill="#FFFFFF" stroke="#000" stroke-width="1.6"/>`;
+            panel.dots.push({ x, y, text: `${c.name}: ${u.label} median ${hrs(u.v)}` });
+          });
+        }
       }
       panel.boxes.push({ cx, half: cw / 2, name: c.name, title: `${c.name} · ${CAT_LABEL[k]}`, color: c.color, stats: stt, fmt: hrs });
       const name = c.name.length > 18 ? c.name.slice(0, 17) + '…' : c.name;
@@ -355,7 +417,7 @@ function figGrowth(pop, conds, zoom = null) {
 
 // ---------------------------------------------------------------- box plots over time (colonies)
 // One panel: groups of boxes at each time point, one box per condition.
-function boxTimePanel({ s0 = '', x0, t, pw, ph, theme, times, conds, key, log = false, title = '', ylabel = '', ax = null }) {
+function boxTimePanel({ s0 = '', x0, t, pw, ph, theme, times, conds, key, log = false, title = '', ylabel = '', ax = null, marks = null }) {
   const T = TH[theme];
   const nc = Math.max(1, conds.length), ng = Math.max(1, times.length);
   const gw = pw / ng, bw = Math.min(34, gw * 0.84 / nc);
@@ -396,7 +458,13 @@ function boxTimePanel({ s0 = '', x0, t, pw, ph, theme, times, conds, key, log = 
   s += `<path d="M${x0} ${t}V${t + ph}H${x0 + pw}" stroke="${T.axis}" fill="none"/>`;
   times.forEach((tt, ti) => { s += `<text x="${r1(x0 + (ti + 0.5) * gw)}" y="${t + ph + 16}" font-size="${T.fs + 1}" font-family="${T.font}" text-anchor="middle" fill="${T.text}">${ixNum(tt, 1)}</text>`; });
   s += `<text x="${x0 + pw / 2}" y="${t + ph + 34}" font-size="12" text-anchor="middle" fill="${T.sub}">Time (h)</text>`;
-  if (title) s += `<text x="${x0 + pw / 2}" y="${t - 14}" font-size="13" font-weight="700" text-anchor="middle" fill="${theme === 'pub' ? '#000' : T.sub}">${title}</text>`;
+  if (title) s += `<text x="${x0 + pw / 2}" y="${t - (marks ? 24 : 14)}" font-size="13" font-weight="700" text-anchor="middle" fill="${theme === 'pub' ? '#000' : T.sub}">${title}</text>`;
+  if (marks) times.forEach((tt, ti) => {
+    const m = marks[ti];
+    if (!m || !m.text) return;
+    const xa = x0 + ti * gw + gw / 2 - (nc - 1) / 2 * bw, xb = x0 + ti * gw + gw / 2 + (nc - 1) / 2 * bw;
+    s += `<g><title>${esc(m.tip)}</title>${nc > 1 ? `<path d="M${r1(xa)} ${t - 3}V${t - 7}H${r1(xb)}V${t - 3}" fill="none" stroke="${T.axis}" stroke-width="1"/>` : ''}<text x="${r1((xa + xb) / 2)}" y="${t - 9.5}" font-size="${m.small ? 8.5 : 10.5}" text-anchor="middle" fill="${T.text}">${esc(m.text)}</text></g>`;
+  });
   if (ylabel) s += `<text x="${x0 - 46}" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="${T.sub}" transform="rotate(-90 ${x0 - 46} ${t + ph / 2})">${ylabel}</text>`;
   const panel = { type: 'box', x0, x1: x0 + pw, y0: t, y1: t + ph, boxes: [], dots: [], ring: T.ring };
   const rnd = seeded(11);
@@ -436,14 +504,29 @@ function colonyBoxChart(dist, conds, key, log) {
 }
 
 // Figures page: both colony box plots side by side
-function figColonyBoxes(dist, conds, log) {
+// One marker per time point: the test across conditions there (stars or p), for the colony box plots.
+function colonyMarks(st, measure, times) {
+  const o = statsOpts();
+  if (!o.on || !st || !st.families) return null;
+  return times.map((tt) => {
+    const f = st.families.find((x) => x.measure === measure && Math.abs(x.time - tt) < 1e-6);
+    if (!f || !f.ok) return null;
+    if (o.hide_ns && !(f.p < 0.05)) return null;
+    const pairs = f.pairs.filter((pr) => pr.p < 0.05).map((pr) => `${pr.b_name} vs ${pr.a_name} ${pr.stars}`).join('; ');
+    return { text: o.label === 'p' ? pText(f.p).replace(/^p = /, '') : f.stars, small: o.label === 'p',
+      tip: `${f.title}: ${f.test}, ${pText(f.p)}${pairs ? `. ${f.post || ''}: ${pairs}` : ''}` };
+  });
+}
+
+function figColonyBoxes(dist, conds, log, st) {
   const ng = Math.max(1, dist.times.length), nc = Math.max(1, conds.length);
   const pw = Math.max(320, Math.min(620, ng * (nc * 16 + 14))), ph = 210, l = 66, gap = 80;
-  const t = 40 + conds.length * 16;
+  const mc = colonyMarks(st, 'count', dist.times), ma = colonyMarks(st, 'area', dist.times);
+  const t = 40 + conds.length * 16 + (mc || ma ? 12 : 0);
   const W = l + 2 * pw + gap + 16, H = t + ph + 52;
   let s = svgOpen(W, H, 'Colonies over time, box plots');
-  const a = boxTimePanel({ x0: l, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'counts', title: 'Colony number', ylabel: 'Colonies per image', ax: 'y0' });
-  const b = boxTimePanel({ x0: l + pw + gap, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'areas', log, title: `Colony area${log ? ' (log scale)' : ''}`, ylabel: 'Colony area (µm²)', ax: 'y1' });
+  const a = boxTimePanel({ x0: l, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'counts', title: 'Colony number', ylabel: 'Colonies per image', ax: 'y0', marks: mc });
+  const b = boxTimePanel({ x0: l + pw + gap, t, pw, ph, theme: 'pub', times: dist.times, conds, key: 'areas', log, title: `Colony area${log ? ' (log scale)' : ''}`, ylabel: 'Colony area (µm²)', ax: 'y1', marks: ma });
   s += a.s + b.s;
   // legend (boxes)
   conds.forEach((c, j) => { const y = 36 + j * 16; s += `<rect x="${l + 8}" y="${y - 10}" width="14" height="11" fill="${esc(c.color)}" fill-opacity="0.35" stroke="#000"/><text x="${l + 28}" y="${y}" font-size="11" fill="#000">${esc(shortName(c.name))}</text>`; });
@@ -521,11 +604,24 @@ const FIG_HINT_BOX = 'Hover a box for median, quartiles and n, or a dot for its 
 
 function condKey(n) { return String(n).toLowerCase().split(/\s+/).filter(Boolean).join(' '); }
 
+function statsQuery(what) {
+  const o = statsOpts();
+  return `box_stats?what=${what}&unit=${o.unit}${o.control ? `&control=${encodeURIComponent(o.control)}` : ''}${what === 'colonies' && S.fig.every ? `&every=${S.fig.every}` : ''}`;
+}
+
+async function loadStats(ctx) {
+  const o = statsOpts();
+  if (!o.on) { ctx.stDur = null; ctx.stCol = null; return; }
+  const [a, b] = await Promise.all([api(statsQuery('durations')).catch(() => null), api(statsQuery('colonies')).catch(() => null)]);
+  ctx.stDur = a; ctx.stCol = b;
+}
+
 async function figData(force = false) {
   if (S.fig.ctx && !force) return S.fig.ctx;
   const ev = S.fig.every ? `?every=${S.fig.every}` : '';
   const [d, pop, dist] = await Promise.all([api('figures'), api('population'), api('colony_dist' + ev)]);
   S.fig.ctx = { d, pop, dist };
+  await loadStats(S.fig.ctx);
   return S.fig.ctx;
 }
 
@@ -548,7 +644,7 @@ function figDefs(ctx) {
 }
 
 function figDefsRaw(ctx) {
-  const { d, pop, dist } = ctx;
+  const { d, pop, dist, stDur, stCol } = ctx;
   const shown = d.conditions.filter((c) => !c.hidden && c.n > 0);
   const shownAll = d.conditions.filter((c) => !c.hidden);
   const byId = Object.fromEntries((dist.conditions || []).map((c) => [c.id, c]));
@@ -564,7 +660,7 @@ function figDefsRaw(ctx) {
       axes: [AX_TIME, AX_PCT], build: (z) => figPopComposition(pop, shownAll, z) },
     { id: 'fig-b', title: 'Time spent in each phase', ok: shown.length, clickable: true,
       sub: 'Hours in each phase, for phases seen from start to end inside the movie. One dot per cell per phase; boxes show the median and quartiles, whiskers 1.5 × IQR. Every value is ± one frame interval.',
-      axes: [{ k: 'y', label: 'Hours per observed stage' }], build: () => figDurations(d, shown) },
+      axes: [{ k: 'y', label: 'Hours per observed stage' }], build: () => figDurations(d, shown, stDur), stats: 'durations', st: stDur },
     { id: 'fig-c', title: 'Phase fractions of the followed cells', time: true, ok: shown.length,
       sub: 'Percent of the followed cells in each phase, per condition (the same cells as the composition figure).',
       axes: [AX_TIME, AX_PCT], build: (z) => figFractions(d, shown, z) },
@@ -578,10 +674,11 @@ function figDefsRaw(ctx) {
     { id: 'fig-d', title: 'Colonies over time', time: S.fig.colStyle !== 'box', ok: hasCol, colonies: true,
       sub: `From the confluence mask: touching cells form one colony; objects under ${minObj} µm² are ignored as debris. ${S.fig.colStyle === 'box' ? 'Box plots: colonies per image (one dot per image) and the area of every colony (a sample of dots shown), at regular time points.' : 'Lines are the mean across wells, bands the SEM.'}`,
       axes: (S.fig.colStyle === 'box' ? [] : [AX_TIME]).concat([{ k: 'y0', label: 'Colonies per image' }, { k: 'y1', label: `Colony area (µm²)${S.fig.colStyle === 'box' && S.fig.log ? ', log' : ''}` }]),
-      build: (z) => (S.fig.colStyle === 'box' ? figColonyBoxes(dist, distConds, S.fig.log) : figColonies(pop, shownAll, z)),
+      build: (z) => (S.fig.colStyle === 'box' ? figColonyBoxes(dist, distConds, S.fig.log, stCol) : figColonies(pop, shownAll, z)),
+      stats: S.fig.colStyle === 'box' ? 'colonies' : null, st: stCol,
       variants: [
         { name: 'Colonies over time (lines)', build: () => figColonies(pop, shownAll, null) },
-        { name: 'Colonies over time (box plots)', build: () => figColonyBoxes(dist, distConds, S.fig.log) },
+        { name: 'Colonies over time (box plots)', build: () => figColonyBoxes(dist, distConds, S.fig.log, stCol) },
       ] },
     { id: 'fig-g', title: 'Red versus green at selected time points', ok: true, scatter: true,
       axes: [{ k: 'x', label: 'Green (PIP-mVenus)' }, { k: 'y', label: 'Red (mCherry-Geminin)' }],
@@ -605,8 +702,60 @@ function figSection(def) {
   return `<section class="card" aria-labelledby="${def.id}-h"><div class="card-head"><div><h2 id="${def.id}-h">${def.title}</h2><p>${def.sub}</p></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">${def.colonies ? colonyControls() : ''}${def.scatter ? scatterControls() : ''}${def.axes && def.axes.length ? `<button type="button" class="btn sm" data-axes="${def.id}" aria-expanded="${!!S.fig.axOpen[def.id]}">Axes${axSet(def.id) ? ' ·  set' : ''}</button>` : ''}${magControls(def.id)}<button class="btn" data-save="${def.id}" data-name="${esc(def.title)}">${ICON.down} Save PNG + SVG</button></div></div>
     ${def.axes && S.fig.axOpen[def.id] ? axesEditor(def) : ''}
+    ${def.stats && def.ok ? statsControls(def) : ''}
     <div class="fig-card" id="${def.id}" data-mag="${S.fig.mag[def.id] || 0}">${body}</div>
-    <p class="small muted">${def.hint || (def.time ? FIG_HINT_TIME : def.clickable ? FIG_HINT_BOX + ' Click a dot to open that cell.' : FIG_HINT_BOX)}</p></section>`;
+    <p class="small muted">${def.hint || (def.time ? FIG_HINT_TIME : def.clickable ? FIG_HINT_BOX + ' Click a dot to open that cell.' : FIG_HINT_BOX)}</p>
+    ${def.stats && def.ok && statsOpts().on ? statsTable(def.st, def.stats) : ''}</section>`;
+}
+
+const UNIT_NAME = { durations: 'Each cell', colonies: 'Each image / colony' };
+
+function statsControls(def) {
+  const o = statsOpts();
+  const fam = def.st && def.st.families ? def.st.families.find((f) => f.ok) || def.st.families[0] : null;
+  const av = (fam && fam.available) || {};
+  const autoUnit = fam && fam.ok && o.unit === 'auto' ? ` (${fam.unit_label})` : '';
+  const conds = (S.fig.ctx.d.conditions || []).filter((c) => !c.hidden);
+  const opt = (v, label, n, min) => `<option value="${v}" ${o.unit === v ? 'selected' : ''} ${n != null && n < min ? 'disabled' : ''}>${label}${n != null ? ` · n ≥ ${n}` : ''}</option>`;
+  return `<div class="stats-ctl" role="group" aria-label="Statistics">
+    <label class="chip"><input type="checkbox" data-stopt="on" ${o.on ? 'checked' : ''}>Statistics</label>
+    ${o.on ? `<label class="small muted" for="st-unit-${def.id}">Compare</label>
+    <select class="input" id="st-unit-${def.id}" data-stopt="unit" title="What counts as one sample. Experiments (biological replicates) or wells (technical replicates) give honest p values; every cell on its own is descriptive only.">
+      <option value="auto" ${o.unit === 'auto' ? 'selected' : ''}>Automatic${autoUnit}</option>
+      ${opt('experiments', 'Experiments', av.experiments, 2)}${opt('wells', 'Wells', av.wells, 2)}${opt('objects', UNIT_NAME[def.stats], av.objects, 3)}</select>
+    <select class="input" data-stopt="control" aria-label="Which pairs to compare">
+      <option value="" ${!o.control ? 'selected' : ''}>All pairs</option>
+      ${conds.map((c) => `<option value="${esc(c.id)}" ${o.control === c.id ? 'selected' : ''}>Each vs ${esc(c.name)}</option>`).join('')}</select>
+    <select class="input" data-stopt="label" aria-label="Show stars or p values"><option value="stars" ${o.label !== 'p' ? 'selected' : ''}>Stars</option><option value="p" ${o.label === 'p' ? 'selected' : ''}>P values</option></select>
+    <label class="chip"><input type="checkbox" data-stopt="hide_ns" ${o.hide_ns ? 'checked' : ''}>Hide ns</label>` : ''}</div>`;
+}
+
+function statsTable(st, what) {
+  if (!st || !st.families) return '<p class="small muted">Statistics unavailable.</p>';
+  const unitsOf = (f) => (f.units_of ? ` ${f.units_of}` : '');
+  const fams = st.families;
+  const famHTML = (f) => {
+    if (!f.ok) return `<div class="st-fam"><strong>${esc(f.title)}</strong> <span class="small muted">${esc(f.why || '')}</span></div>`;
+    const ctr = f.center === 'mean' ? 'mean' : 'median';
+    const groups = f.groups.map((g) => `${esc(g.name)} ${num(f.center === 'mean' ? g.mean : g.median)}${unitsOf(f)} (n = ${g.n})`).join(' · ');
+    const rows = f.pairs.map((pr) => `<tr><td>${esc(pr.b_name)} vs ${esc(pr.a_name)}</td><td class="mono">${pr.diff >= 0 ? '+' : ''}${num(pr.diff)}${unitsOf(f)}</td><td class="mono">${pr.ci ? `${num(pr.ci[0])} to ${num(pr.ci[1])}` : '–'}</td><td class="mono">${esc(pText(pr.p).replace(/^p = /, '').replace(/^p /, ''))}</td><td><strong>${esc(pr.stars)}</strong></td></tr>`).join('');
+    return `<div class="st-fam"><div><strong>${esc(f.title)}</strong> · ${esc(f.test)}, ${esc(f.stat_label)} = ${num(f.stat)}, ${esc(pText(f.p))} <strong>${esc(f.stars)}</strong>${f.post ? ` · ${esc(f.post)}` : ''}</div>
+      <div class="small muted">${esc(f.unit_label)}: ${ctr}s ${groups}</div>
+      <table class="st-table"><thead><tr><th>Comparison</th><th>Difference (${ctr})</th><th>95% CI</th><th>${f.pairs.length > 1 ? 'Adjusted p' : 'p'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  };
+  let body;
+  if (what === 'colonies') {
+    const by = (m) => fams.filter((f) => f.measure === m);
+    body = [['count', 'Colonies per image'], ['area', 'Colony area']].map(([m, name]) => `<details class="st-sub"><summary>${name}: ${by(m).filter((f) => f.ok && f.p < 0.05).length} of ${by(m).length} time points differ (p < 0.05)</summary>${by(m).map(famHTML).join('')}</details>`).join('');
+  } else body = fams.map(famHTML).join('');
+  const notes = [...new Set(fams.flatMap((f) => f.notes || []))];
+  const cens = what === 'durations' ? fams.filter((f) => f.ok).map((f) => `${f.title.replace(' duration', '')}: ${f.groups.map((g) => g.censored || 0).reduce((a, b) => a + b, 0)}`).join(', ') : '';
+  return `<details class="stats-box" ${S.fig.stOpen && S.fig.stOpen[what] === false ? '' : 'open'} data-stbox="${what}"><summary><strong>Statistics</strong></summary>
+    ${notes.length ? `<div class="info">${ICON.info}<span>${notes.map(esc).join(' ')}</span></div>` : ''}
+    ${body}
+    ${cens ? `<p class="small muted">Phases cut off by the start or end of the movie are left out (${esc(cens)} per phase). Long phases are cut off more often, so medians lean short.</p>` : ''}
+    <div class="st-methods"><span class="small muted">For the methods section</span><p>${esc(st.methods)}</p></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="btn sm" data-stcopy="${what}">Copy methods text</button><button type="button" class="btn sm" data-stsave="${what}">${ICON.down} Save table (CSV)</button></div></details>`;
 }
 
 async function scatterData(tps) {
@@ -733,7 +882,7 @@ function bindFigures(d) {
   const ce = $('#col-every');
   if (ce) ce.onchange = async () => {
     S.fig.every = ce.value ? parseFloat(ce.value) : null;
-    try { S.fig.ctx.dist = await api('colony_dist' + (S.fig.every ? `?every=${S.fig.every}` : '')); } catch (err) { return fail(err); }
+    try { S.fig.ctx.dist = await api('colony_dist' + (S.fig.every ? `?every=${S.fig.every}` : '')); await loadStats(S.fig.ctx); } catch (err) { return fail(err); }
     rerenderFig('fig-d');
   };
   const cl = $('#col-log'); if (cl) cl.onchange = () => { S.fig.log = cl.checked; rerenderFig('fig-d'); };
@@ -760,6 +909,23 @@ function bindFigures(d) {
     setHours(left);
   });
   $$('[data-axes]').forEach((b) => b.onclick = () => { S.fig.axOpen[b.dataset.axes] = !S.fig.axOpen[b.dataset.axes]; rerenderFig(b.dataset.axes); });
+  $$('[data-stopt]').forEach((el) => el.onchange = async () => {
+    const o = statsOpts();
+    const k = el.dataset.stopt;
+    o[k] = el.type === 'checkbox' ? el.checked : (el.value || null);
+    if (k === 'unit' && !o.unit) o.unit = 'auto';
+    try { const r = await api('settings', { stats_opts: o }); S.st = r.state; markSaved(); } catch (err) { return fail(err); }
+    try { await loadStats(S.fig.ctx); } catch (err) { return fail(err); }
+    rerenderFig('fig-b'); rerenderFig('fig-d');
+  });
+  $$('[data-stbox]').forEach((det) => det.ontoggle = () => { S.fig.stOpen = { ...(S.fig.stOpen || {}), [det.dataset.stbox]: det.open }; });
+  $$('[data-stcopy]').forEach((b) => b.onclick = async () => {
+    const st = b.dataset.stcopy === 'colonies' ? S.fig.ctx.stCol : S.fig.ctx.stDur;
+    try { await navigator.clipboard.writeText(st.methods); toast('Methods text copied.'); } catch (err) { toast('Select the text and copy it with ⌘C.'); }
+  });
+  $$('[data-stsave]').forEach((b) => b.onclick = async () => {
+    try { const r = await api(statsQuery(b.dataset.stsave) + '&save=1'); toast('Saved the statistics table.', { action: { label: 'Show in Finder', fn: () => api('reveal', { path: r.saved }).catch(fail) }, ms: 12000 }); } catch (err) { fail(err); }
+  });
   $$('[data-ax-auto]').forEach((b) => b.onclick = () => saveAxes(b.dataset.axAuto, null));
   $$('.ax-in').forEach((inp) => inp.onchange = () => {
     const id = inp.dataset.axFig;
@@ -844,7 +1010,11 @@ async function exportAll(btn) {
       if (j.scatter) { if (!scatterConds(ctx.d).length) continue; out = (await buildScatterFigure(ctx.d))(); } else out = j.build();
       last = await saveSVG(j.name, out.svg, folder);
     }
-    if (last) toast(`Exported ${n} graphs and figures (PNG + SVG).`, { action: { label: 'Show in Finder', fn: () => api('reveal', { path: last.folder }).catch(fail) }, ms: 15000 });
+    if (statsOpts().on && last) {
+      await api(statsQuery('durations') + `&save=1&folder=${encodeURIComponent(folder)}`).catch(() => null);
+      await api(statsQuery('colonies') + `&save=1&folder=${encodeURIComponent(folder)}`).catch(() => null);
+    }
+    if (last) toast(`Exported ${n} graphs and figures (PNG + SVG)${statsOpts().on ? ' and the statistics tables' : ''}.`, { action: { label: 'Show in Finder', fn: () => api('reveal', { path: last.folder }).catch(fail) }, ms: 15000 });
   } catch (e) { fail(e); }
   if (btn) { btn.disabled = false; btn.innerHTML = label; }
 }

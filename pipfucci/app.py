@@ -68,6 +68,13 @@ def selftest() -> int:
         rs = annotate.export(exp, "B2", 1, [3], lay, fmt="svg")
         assert len(ra["paths"]) == 3 and "nucleus-outlines" in Path(rs["paths"][0]).read_text()
         print("annotated image font:", getattr(annotate._font(20), "path", "built-in"), flush=True)
+        import numpy as np
+
+        from . import stats  # box-plot statistics: scipy's tests in the bundle (Tukey, Dunnett, ...)
+
+        sd = stats.run([exp], "durations")
+        assert len(sd["families"]) == 3 and stats.mean_tests([np.arange(4.0), np.arange(4.0) + 1, np.arange(4.0) + 2], 0)["pairs"]
+        print("statistics:", "; ".join(f"{f['title']}: {f.get('test', f.get('why'))}" for f in sd["families"]), flush=True)
         srv, port = serve(0)
         st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=10).read())
         assert st["app"] == "PIP-FUCCI" and st["display_name"] == DISPLAY_NAME

@@ -11,7 +11,7 @@ from pipfucci import __version__  # noqa: E402
 
 hidden = ["pipfucci." + m for m in ("app", "server", "experiment", "pipeline", "segment", "track", "phases",
                                      "analysis", "export", "render", "demo", "io_incucyte", "settings", "updater",
-                                     "compare", "macos", "net", "annotate", "remote")]
+                                     "compare", "macos", "net", "annotate", "remote", "stats")]
 hidden += ["truststore", "certifi", "skimage.measure", "skimage.measure._find_contours"]
 for pkg in ("skimage.feature", "skimage.segmentation", "skimage.filters", "skimage.registration", "imagecodecs"):
     hidden += collect_submodules(pkg)

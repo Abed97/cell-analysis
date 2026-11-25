@@ -676,6 +676,36 @@ def add_login_item() -> dict:
     return {"ok": True, "app": str(app)}
 
 
+def box_stats(q: dict) -> dict:
+    """Statistics between conditions for the duration and colony box plots (see stats.py)."""
+    from . import compare, stats
+
+    exps = all_exps(need_results())
+    what = "colonies" if q.get("what") == "colonies" else "durations"
+    times = None
+    if what == "colonies":
+        ev = float(q["every"]) if q.get("every") else None
+        times = compare.colony_dist(exps, ev)["times"]
+        if q.get("times"):
+            want = [float(x) for x in str(q["times"]).split(",") if x.strip()]
+            times = [t for t in times if any(abs(t - w) < 1e-6 for w in want)] or times
+    res = stats.run(exps, what, q.get("unit") or "auto", q.get("control") or None, times)
+    if q.get("save"):
+        import re
+
+        name = "Statistics - phase durations" if what == "durations" else "Statistics - colonies"
+        folder = need_results().results_dir / "figures"
+        if q.get("folder"):  # "Export all": the same dated folder as the figures
+            folder = folder / (re.sub(r"[^A-Za-z0-9 _().+-]+", "_", str(q["folder"])).strip() or "All graphs")
+        else:
+            name += " " + time.strftime("%Y-%m-%d %H%M%S")
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{name}.csv"
+        path.write_text(stats.to_csv(res), encoding="utf-8")
+        res["saved"] = str(path)
+    return res
+
+
 def run_analysis():
     exp = need_exp()
 
@@ -808,6 +838,8 @@ class Handler(BaseHTTPRequestHandler):
 
                 ev = float(q["every"]) if q.get("every") else None
                 return self._json(compare.colony_dist(all_exps(need_results()), ev))
+            if ep == "box_stats":
+                return self._json(box_stats(q))
             if ep == "figures":
                 from . import compare
 
