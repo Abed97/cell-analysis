@@ -61,7 +61,13 @@ affected; they live next to the images.
    confluence (mean ± SEM across wells), and red-vs-green plots at selected timepoints.
 4. **Single cells** – track heatmap, per-cell image montage and traces, phase durations, a
    **family tree** of each cell's lineage (parent to daughters, coloured by phase), and a dot plot
-   of durations by condition. Tracks can be excluded or marked as reviewed.
+   of durations by condition. Tracks can be excluded or marked as reviewed. **Export…** above the
+   montage saves it for a paper (PNG, TIFF at 300 dpi, or SVG with real text; 2×, 4× or 8× camera
+   pixels, repeated, never smoothed): 4 to 24 time points, the rows you tick (mCherry-Geminin,
+   PIP-mVenus, phase, merge), with the time above and the phase call below each column, a title
+   and a scale bar, into `figures/Images/`. **Save PNG + SVG** on the traces saves a white,
+   publication version (the time range you are zoomed to) with the phase shading and a strip of
+   the frame-by-frame call, Colourless included.
 5. **Figures** – publication-style figures on a white background: cell-cycle composition over
    time per condition, time spent in each phase (box plots with every cell), and phase fractions
    over time. Choose order, colour and dashed lines per condition; **Save PNG + SVG** writes them to
@@ -101,6 +107,17 @@ the test, the comparisons with differences and 95% CIs, a methods paragraph to c
 table (CSV)*; *Export all* saves the tables with the figures. Only phases seen from start to end
 are included; how many were cut off by the start or end of the movie is shown, because long
 phases are cut off more often.
+
+**Colourless cells (no reporter or in transition)** (Figures): the composition of all cells, as in
+*Cell-cycle composition of all cells over time*, with the colourless cells split in two. A cell
+counts as having **no reporter** when it and its whole family (mother, daughters and so on) are
+colourless for at least the share of the time set in the figure's header (90% by default), and the
+family is followed for at least the hours set there (12 h by default). Every other colourless
+cell is **in transition**: it shows the reporter at another time or in a relative (just after
+division, at the G1/S switch, or too dim to call for a while), since the reporter is inherited.
+Shorter wholly colourless stretches count as transitions, because they look the same. The two
+parts add up to Colourless; both are in the Prism tables and the summary, and the per-cell table
+has a `no_reporter` column.
 
 **G1 arrest** (Figures › *Cells in G1 arrest*): the percent of cells that stay in G1 for at least
 the time set in the figure's header (22 h by default). A cell seen in G1 that long counts as

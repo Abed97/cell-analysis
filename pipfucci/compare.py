@@ -75,13 +75,16 @@ def _resample(hours: list[float], values: np.ndarray, g: np.ndarray, fill=np.nan
 
 def population(exps: list[Experiment]) -> dict:
     g = grid(exps)
+    # the open experiment's settings, for all
+    pct = exps[0].settings.no_reporter_pct if exps else None
+    min_h = exps[0].settings.no_reporter_min_h if exps else None
     lab = {id(e): n for e, n in zip(exps, exp_labels(exps))}
     conds = []
     for grp in groups(exps, include_hidden=True):
-        series = {k: [] for k in A.CALLS + ["count_norm", "confluence", "total", "colonies", "colony_area"]}
+        series = {k: [] for k in A.CALLS + A.CL_SPLIT + ["count_norm", "confluence", "total", "colonies", "colony_area"]}
         wells = []
         for e, ws_names in grp["members"]:
-            ws = A.well_series(e)
+            ws = A.well_series(e, pct, min_h)
             hours = e.frame_hours()
             for w in ws_names:
                 if w not in ws:
@@ -89,6 +92,8 @@ def population(exps: list[Experiment]) -> dict:
                 wells.append(w if len(exps) == 1 else f"{lab[id(e)]}: {w}")
                 for i, p in enumerate(A.CALLS):
                     series[p].append(_resample(hours, ws[w]["frac"][:, i], g))
+                for i, p in enumerate(A.CL_SPLIT):
+                    series[p].append(_resample(hours, ws[w]["frac_cl"][:, i], g))
                 for k in ("count_norm", "confluence", "total", "colonies", "colony_area"):
                     series[k].append(_resample(hours, ws[w][k], g))
         if not wells:
@@ -98,7 +103,7 @@ def population(exps: list[Experiment]) -> dict:
             m, sem = A._mean_sem(np.vstack(arrs))
             entry[k] = {"mean": A._clean(m), "sem": A._clean(sem)}
         conds.append(entry)
-    return {"hours": [round(float(x), 3) for x in g], "conditions": conds}
+    return {"hours": [round(float(x), 3) for x in g], "conditions": conds, "no_reporter_pct": pct, "no_reporter_min_h": min_h}
 
 
 def figures(exps: list[Experiment]) -> dict:

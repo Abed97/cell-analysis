@@ -88,6 +88,10 @@ class Settings:
     # (None = all pairs), label (stars/p), hide non-significant brackets
     stats_opts: dict = field(default_factory=lambda: dict(STATS_DEFAULT))
     g1_arrest_h: float = 22.0  # a cell in G1 for at least this long counts as G1-arrested
+    # a cell counts as having no reporter when it is colourless for at least this percent of the
+    # time it is followed, and so are its mother and daughters
+    no_reporter_pct: float = 90.0
+    no_reporter_min_h: float = 12.0  # ... and is followed (with them) for at least this long
     styles: dict = field(default_factory=dict)  # figure style per condition name: color, dashed, order, hidden
 
     # ---------- derived ----------
@@ -291,6 +295,14 @@ class Settings:
             self.g1_arrest_h = float(min(1000.0, max(0.5, float(self.g1_arrest_h))))
         except (TypeError, ValueError):
             self.g1_arrest_h = 22.0
+        try:
+            self.no_reporter_pct = float(min(100.0, max(50.0, float(self.no_reporter_pct))))
+        except (TypeError, ValueError):
+            self.no_reporter_pct = 90.0
+        try:
+            self.no_reporter_min_h = float(min(1000.0, max(0.0, float(self.no_reporter_min_h))))
+        except (TypeError, ValueError):
+            self.no_reporter_min_h = 12.0
         if not isinstance(self.styles, dict):
             self.styles = {}
         if not isinstance(self.linked, list):

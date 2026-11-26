@@ -485,6 +485,18 @@ def export_image(b: dict) -> dict:
                            bar=bool(b.get("bar", True)), legend=bool(b.get("legend")), text=str(b.get("text", "medium")))
 
 
+def export_montage(b: dict) -> dict:
+    """One cell's image montage (the track card) for a paper or a talk (see annotate.track_montage)."""
+    from . import annotate
+
+    exp = need_results()
+    rows = [r for r in (b.get("rows") or []) if r in annotate.MONT_ROWS]
+    return annotate.track_montage(exp, str(b["key"]), n=int(b.get("n", 8)), rows=rows, fmt=str(b.get("fmt", "png")),
+                                  scale=int(b.get("scale", 4)), calls=bool(b.get("calls", True)),
+                                  times=bool(b.get("times", True)), title=bool(b.get("title", True)),
+                                  bar=bool(b.get("bar", True)), text=str(b.get("text", "medium")))
+
+
 def hand_remove(b: dict) -> dict:
     """Take one object out of the counts by hand: a nucleus in this image ("object"), its whole
     track ("track"), or a confluence area ("patch", in this image or with every=True in all)."""
@@ -969,6 +981,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(state())
             if ep == "remask":
                 return self._json(run_remask())
+            if ep == "export_montage":
+                return self._json(export_montage(b))
             if ep == "save_figure":
                 return self._json(save_figure(b))
             if ep == "restart":

@@ -12,6 +12,8 @@ from .experiment import Experiment
 
 PH = ["G1", "S", "G2M"]
 CALLS = ["G1", "S", "G2M", "Colourless"]
+CL_SPLIT = ["CL_trans", "CL_none"]  # colourless in a transition / no reporter (they add up to Colourless)
+CL_SPLIT_NAMES = {"CL_trans": "Colourless, in transition", "CL_none": "Colourless, no reporter"}
 
 
 def _call_col(c: pd.DataFrame) -> str:
@@ -54,19 +56,87 @@ def _conditions(exp: Experiment):
     return out
 
 
-def well_series(exp: Experiment) -> dict:
-    """Per well and frame: counts by phase, total, confluence (mean over fields)."""
+def no_reporter(exp: Experiment, pct: float | None = None, min_h: float | None = None) -> np.ndarray:
+    """Per row of the cells table: True for cells that never show the reporter.
+
+    A track shows the reporter when it is coloured (G1, S or G2/M) for more than (100 - pct)% of
+    the time it is followed. Having the reporter is inherited, so a cell whose mother or daughters
+    (or any relative) show it has it too: its colourless time is a transition (just after
+    division, at the G1/S switch, or a stretch too dim to call). Only cells whose whole family
+    stays colourless, and is followed for at least min_h hours in all, count as having no
+    reporter; a shorter colourless stretch looks the same as a transition."""
+    c = exp.cells
+    s = exp.settings
+    pct = float(s.no_reporter_pct if pct is None else pct)
+    min_h = float(s.no_reporter_min_h if min_h is None else min_h)
+    if c is None or not len(c):
+        return np.zeros(0, bool)
+    key = (round(pct, 4), round(min_h, 4), id(c), len(c), s.gate_red, s.gate_green, s.smoothing_frames,
+           s.interval_min, id(exp.tracks), len(exp.tracks) if exp.tracks is not None else 0)
+    if getattr(exp, "_nr_key", None) == key:
+        return exp._nr_val
+    out = np.zeros(len(c), bool)
+    if "call" in c:
+        cl = c["call"].values == 3
+        codes, uniq = pd.factorize(c["track"].values)
+        ok = codes >= 0
+        n = np.bincount(codes[ok], minlength=len(uniq))
+        ncl = np.bincount(codes[ok], weights=cl[ok].astype(float), minlength=len(uniq))
+        coloured = ncl / np.maximum(n, 1) < pct / 100.0 - 1e-9
+        # families: union of each track with its mother
+        root = {k: k for k in uniq}
+
+        def find(k):
+            while root.get(k, k) != k:
+                root[k] = root.get(root[k], root[k])
+                k = root[k]
+            return k
+
+        t = exp.tracks
+        if t is not None and "parent" in t:
+            for k, par in zip(t.index, t["parent"].values):
+                if par and k in root:
+                    root.setdefault(par, par)
+                    a, b = find(k), find(par)
+                    if a != b:
+                        root[a] = b
+        fam_col, fam_n = {}, {}
+        for k, col, nk in zip(uniq, coloured, n):
+            r = find(k)
+            fam_col[r] = fam_col.get(r, False) or bool(col)
+            fam_n[r] = fam_n.get(r, 0) + int(nk)
+        long_enough = lambda r: fam_n[r] * s.interval_h >= min_h - 1e-9  # noqa: E731
+        none_track = np.array([not fam_col[r] and long_enough(r) for r in (find(k) for k in uniq)], bool)
+        out[ok] = none_track[codes[ok]]
+    exp._nr_key, exp._nr_val = key, out
+    return out
+
+
+def well_series(exp: Experiment, no_reporter_pct: float | None = None, no_reporter_min_h: float | None = None) -> dict:
+    """Per well and frame: counts by phase, total, confluence (mean over fields), and the
+    colourless cells split into those in a transition and those with no reporter (frac_cl)."""
     c = _active(exp)
     n_frames = len(exp.index["times_min"])
     out = {}
     col = _call_col(c)
     exf = exp.excluded_frames()
+    nr_all = no_reporter(exp, no_reporter_pct, no_reporter_min_h)
+    pos = exp.cells.index.get_indexer(c.index) if len(c) else np.zeros(0, int)
+    nr = pd.Series(nr_all[pos] if len(nr_all) else np.zeros(len(c), bool), index=c.index)
     for well, sub in c.groupby("well", sort=False):
         counts = np.zeros((n_frames, 4))
         tab = sub.groupby(["frame", col]).size()
         for (f, p), v in tab.items():
             if 0 <= f < n_frames and 0 <= p < 4:
                 counts[f, p] = v
+        split = np.zeros((n_frames, 2))  # colourless: in a transition, no reporter
+        is_cl = sub[col].values == 3
+        if is_cl.any():
+            fr = sub["frame"].values[is_cl].astype(int)
+            none = nr.loc[sub.index[is_cl]].values.astype(bool)
+            inside = (fr >= 0) & (fr < n_frames)
+            np.add.at(split[:, 0], fr[inside & ~none], 1)
+            np.add.at(split[:, 1], fr[inside & none], 1)
         total = counts.sum(axis=1)
         # single images left out: scale the cell count of that time point by the fields that remain,
         # and leave a gap where none remain
@@ -83,6 +153,7 @@ def well_series(exp: Experiment) -> dict:
                 total = np.where(gone, np.nan, total * max(1, len(keys)) / np.maximum(incl, 1))
             counts = counts.copy()
             counts[gone] = np.nan
+            split[gone] = np.nan
         conf = np.full(n_frames, np.nan)
         col_n = np.full(n_frames, np.nan)
         col_a = np.full(n_frames, np.nan)
@@ -113,10 +184,11 @@ def well_series(exp: Experiment) -> dict:
                 col_a = np.where(cnt > 0, tot / np.maximum(cnt, 1), np.nan)  # mean over all colonies
         with np.errstate(divide="ignore", invalid="ignore"):
             frac = counts / np.nansum(counts, axis=1)[:, None] * 100
+            frac_cl = split / np.nansum(counts, axis=1)[:, None] * 100
             t0 = next((v for v in total if np.isfinite(v) and v > 0), None)  # first image kept
             norm = total / t0 if t0 else np.full(n_frames, np.nan)
-        out[well] = {"counts": counts, "total": total, "frac": frac, "count_norm": norm, "confluence": conf,
-                     "colonies": col_n, "colony_area": col_a}
+        out[well] = {"counts": counts, "total": total, "frac": frac, "frac_cl": frac_cl, "count_norm": norm,
+                     "confluence": conf, "colonies": col_n, "colony_area": col_a}
     return out
 
 
@@ -147,6 +219,9 @@ def population(exp: Experiment) -> dict:
         entry = {"id": cnd["id"], "name": cnd["name"], "color": cnd["color"], "wells": wells}
         for i, p in enumerate(CALLS):
             m, s = _mean_sem(np.vstack([ws[w]["frac"][:, i] for w in wells]))
+            entry[p] = {"mean": _clean(m), "sem": _clean(s)}
+        for i, p in enumerate(CL_SPLIT):
+            m, s = _mean_sem(np.vstack([ws[w]["frac_cl"][:, i] for w in wells]))
             entry[p] = {"mean": _clean(m), "sem": _clean(s)}
         for key in ("count_norm", "confluence", "total", "colonies", "colony_area"):
             m, s = _mean_sem(np.vstack([ws[w][key] for w in wells]))
@@ -288,7 +363,8 @@ def track_detail(exp: Experiment, key: str) -> dict:
     f = exp.flags.get(key, {})
     return {
         "key": key, "well": t["well"], "field": int(t["field"]), "tid": int(t["tid"]),
-        "condition": t["condition"], "parent": t["parent"], "children": children,
+        "condition": (exp.settings.condition_of(t["well"]) or {}).get("name", "Unassigned"),  # current name
+        "parent": t["parent"], "children": children,
         "start": int(t["start"]), "end": int(t["end"]), "fate": t["fate"],
         "frames": sub["frame"].astype(int).tolist(),
         "hours": [round(hours[int(fr)], 3) if int(fr) < len(hours) else None for fr in sub["frame"].values],

@@ -3,9 +3,10 @@
 // Population page. Every figure function returns { svg, panels } so ix.js can add hover read-outs
 // and zoom; `zoom` is null or { h0, h1 } in hours.
 
-const PUB = { G1: '#3DAA4F', S: '#E0393E', G2M: '#F2C230', Colourless: '#8C8C8C', Unclassified: '#E8E8E8' };
+const PUB = { G1: '#3DAA4F', S: '#E0393E', G2M: '#F2C230', Colourless: '#8C8C8C', Unclassified: '#E8E8E8', CL_trans: '#C4C4C4', CL_none: '#4D4D4D' };
 const CATS = ['G1', 'S', 'G2M', 'Colourless', 'Unclassified'];
-const CAT_LABEL = { G1: 'G1', S: 'S', G2M: 'G2/M', Colourless: 'Colourless', Unclassified: 'Unclassified' };
+const CAT_LABEL = { G1: 'G1', S: 'S', G2M: 'G2/M', Colourless: 'Colourless', Unclassified: 'Unclassified',
+  CL_trans: 'Colourless, in transition', CL_none: 'Colourless, no reporter' };
 const FF = 'Helvetica, Arial, sans-serif';
 const r1 = (v) => (Math.round(v * 10) / 10).toString();
 const pct = (v) => ixNum(v, 1) + '%';
@@ -157,14 +158,15 @@ function figComposition(d, conds, zoom = null) {
 
 // ---------------------------------------------------------------- A2: composition of all cells
 // Every cell in the images at each time point (not only founders), as the mean of the wells.
-function figPopComposition(pop, conds, zoom = null) {
+// split: the colourless cells shown as two parts, in a transition and without the reporter.
+function figPopComposition(pop, conds, zoom = null, split = false) {
   const by = Object.fromEntries(pop.conditions.map((c) => [c.id, c]));
   const cs = conds.filter((c) => by[c.id]);
-  const cats = ['G1', 'S', 'G2M', 'Colourless'];
-  const pw = 230, ph = 180, gap = 34, l = 58, t = 34, b = 48, legW = 120;
+  const cats = split ? ['G1', 'S', 'G2M', 'CL_trans', 'CL_none'] : ['G1', 'S', 'G2M', 'Colourless'];
+  const pw = 230, ph = 180, gap = 34, l = 58, t = 34, b = 48, legW = split ? 170 : 120;
   const W = l + cs.length * pw + (cs.length - 1) * gap + 28 + legW, H = t + ph + b;
   const hours = pop.hours, hFull = hours[hours.length - 1] || 1;
-  let s = svgOpen(W, H, 'Cell-cycle composition of all cells over time');
+  let s = svgOpen(W, H, split ? 'Colourless cells with and without the reporter over time' : 'Cell-cycle composition of all cells over time');
   const panels = [];
   cs.forEach((c, i) => {
     const p = by[c.id];
@@ -718,6 +720,9 @@ function figDefsRaw(ctx) {
     { id: 'fig-a2', title: 'Cell-cycle composition of all cells over time', time: true, ok: shownAll.length,
       sub: 'Every cell in the images at each time point, not only the founders and their daughters: the share in each phase per well, averaged over the wells of a condition. Images left out (blurry) are skipped.',
       axes: [AX_TIME, AX_PCT], build: (z) => figPopComposition(pop, shownAll, z) },
+    { id: 'fig-a3', title: 'Colourless cells (no reporter or in transition)', time: true, ok: shownAll.length, reporter: true,
+      sub: 'The composition of all cells, with the colourless cells split in two. No reporter: the cell and its whole family (mother, daughters) are colourless for at least the share of the time set here, and are followed for at least the hours set here. In transition: every other colourless cell, one that shows the reporter at another time or in a relative (just after division, at the G1/S switch, or too dim to call for a while).',
+      axes: [AX_TIME, AX_PCT], build: (z) => figPopComposition(pop, shownAll, z, true) },
     { id: 'fig-b', title: 'Time spent in each phase', ok: shown.length, clickable: true,
       sub: 'Hours in each phase, for phases seen from start to end inside the movie. One dot per cell per phase; boxes show the median and quartiles, whiskers 1.5 × IQR. Every value is ± one frame interval.',
       axes: [{ k: 'y', label: 'Hours per observed stage' }], build: () => figDurations(d, shown, stDur), stats: 'durations', st: stDur },
@@ -750,6 +755,14 @@ function figDefsRaw(ctx) {
   ];
 }
 
+function reporterControls() {
+  const st = S.st.experiment.settings;
+  return `<label class="small muted" for="nr-pct" style="white-space:nowrap">No reporter: colourless</label>
+    <span class="unit-input" style="width:86px"><input type="number" id="nr-pct" min="50" max="100" step="1" value="${num(st.no_reporter_pct)}" aria-label="Percent of the time colourless for no reporter"><span>%</span></span>
+    <label class="small muted" for="nr-min" style="white-space:nowrap">of the time, followed ≥</label>
+    <span class="unit-input" style="width:86px"><input type="number" id="nr-min" min="0" max="1000" step="1" value="${num(st.no_reporter_min_h)}" aria-label="Hours followed at least for no reporter"><span>h</span></span>`;
+}
+
 function arrestControls() {
   const v = num(S.st.experiment.settings.g1_arrest_h);
   return `<label class="small muted" for="arr-cut" style="white-space:nowrap">Arrested if in G1 for at least</label>
@@ -769,7 +782,7 @@ function figSection(def) {
     : '<p style="color:#444;padding:20px">No conditions to show. Assign wells on the plate map (step 1) or tick “Show” above.</p>';
   const body = def.scatter ? '<p style="color:#444;padding:20px">Loading…</p>' : def.ok ? ixChart(def.build, { group: def.id }) : empty;
   return `<section class="card" aria-labelledby="${def.id}-h"><div class="card-head"><div><h2 id="${def.id}-h">${def.title}</h2><p>${def.sub}</p></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">${def.arrest ? arrestControls() : ''}${def.colonies ? colonyControls() : ''}${def.scatter ? scatterControls() : ''}${def.axes && def.axes.length ? `<button type="button" class="btn sm" data-axes="${def.id}" aria-expanded="${!!S.fig.axOpen[def.id]}">Axes${axSet(def.id) ? ' ·  set' : ''}</button>` : ''}${magControls(def.id)}<button class="btn" data-save="${def.id}" data-name="${esc(def.title)}">${ICON.down} Save PNG + SVG</button></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">${def.arrest ? arrestControls() : ''}${def.reporter ? reporterControls() : ''}${def.colonies ? colonyControls() : ''}${def.scatter ? scatterControls() : ''}${def.axes && def.axes.length ? `<button type="button" class="btn sm" data-axes="${def.id}" aria-expanded="${!!S.fig.axOpen[def.id]}">Axes${axSet(def.id) ? ' ·  set' : ''}</button>` : ''}${magControls(def.id)}<button class="btn" data-save="${def.id}" data-name="${esc(def.title)}">${ICON.down} Save PNG + SVG</button></div></div>
     ${def.axes && S.fig.axOpen[def.id] ? axesEditor(def) : ''}
     ${def.stats && def.ok ? statsControls(def) : ''}
     <div class="fig-card" id="${def.id}" data-mag="${S.fig.mag[def.id] || 0}">${body}</div>
@@ -998,6 +1011,17 @@ function bindFigures(d) {
     try { const r = await api('settings', { g1_arrest_h: v }); S.st = r.state; markSaved(); await loadStats(S.fig.ctx); } catch (err) { return fail(err); }
     rerenderFig('fig-h');
   };
+  const nrSave = async (k, v, lo, hi, msg) => {
+    if (!(v >= lo && v <= hi)) return toast(msg, { bad: true });
+    try {
+      const r = await api('settings', { [k]: v }); S.st = r.state; markSaved();
+      S.fig.ctx.pop = await api('population');
+    } catch (err) { return fail(err); }
+    rerenderFig('fig-a3');
+  };
+  const np_ = $('#nr-pct'), nm = $('#nr-min');
+  if (np_) np_.onchange = () => nrSave('no_reporter_pct', parseFloat(np_.value), 50, 100, 'Enter a percent between 50 and 100.');
+  if (nm) nm.onchange = () => nrSave('no_reporter_min_h', parseFloat(nm.value), 0, 1000, 'Enter a time between 0 and 1000 h.');
   $$('[data-stbox]').forEach((det) => det.ontoggle = () => { S.fig.stOpen = { ...(S.fig.stOpen || {}), [det.dataset.stbox]: det.open }; });
   $$('[data-stcopy]').forEach((b) => b.onclick = async () => {
     const st = { colonies: S.fig.ctx.stCol, arrest: S.fig.ctx.stArr }[b.dataset.stcopy] || S.fig.ctx.stDur;
@@ -1211,3 +1235,60 @@ document.addEventListener('gesturechange', (ev) => {
   applyMag(gestureMag.id, { x: ev.clientX - r.left, y: ev.clientY - r.top });
 });
 document.addEventListener('gestureend', () => { gestureMag = null; });
+
+// ---------------------------------------------------------------- one cell's traces (track card)
+// Publication version of the track card's chart: red and green over time on white, shaded by the
+// phase call, with the frame-by-frame call (colourless included) as a strip above.
+function traceFigure(d, zoom = null) {
+  const e = S.st.experiment;
+  const hours = e.hours, hmax = hours[hours.length - 1] || 1, dt = e.settings.interval_min / 60;
+  const h0 = zoom ? zoom.h0 : 0, h1 = zoom ? zoom.h1 : hmax;
+  const W = 640, l = 62, r = 168, t = 66, pw = W - l - r, ph = 170, b = 48, H = t + ph + b;
+  const vmax = Math.max(1, ...d.g.filter(Number.isFinite), ...d.r.filter(Number.isFinite));
+  const ymax = Math.ceil(vmax * 5 - 1e-9) / 5;
+  const yt = stepTicks(0, ymax, ymax > 1.6 ? 0.5 : 0.25) || [0, ymax];
+  const sx = (h) => l + (h - h0) / (h1 - h0) * pw, sy = (v) => t + ph - Math.min(Math.max(v, 0), ymax) / ymax * ph;
+  const cid = ixId(), cid2 = ixId();
+  const label = `${d.well}·${d.field}·${d.tid}`;
+  let s = svgOpen(W, H, `Track ${label}: reporter intensities over time`);
+  s += `<defs><clipPath id="${cid}"><rect x="${l}" y="${t}" width="${pw}" height="${ph}"/></clipPath><clipPath id="${cid2}"><rect x="${l}" y="${t - 22}" width="${pw}" height="12"/></clipPath></defs>`;
+  s += `<text x="${l}" y="20" font-size="13" font-weight="700" fill="#000">Track ${esc(label)}${d.condition ? ` · ${esc(d.condition)}` : ''}</text>`;
+  // call per frame
+  const calls = d.call || d.phase;
+  s += `<text x="${l - 7}" y="${t - 12}" font-size="10" text-anchor="end" fill="#444">Call</text><g clip-path="url(#${cid2})">`;
+  d.frames.forEach((f, i) => {
+    const k = ['G1', 'S', 'G2M', 'Colourless'][calls[i]];
+    if (!k) return;
+    const x0 = sx(hours[f] - dt / 2), x1 = sx(hours[f] + dt / 2);
+    s += `<rect x="${r1(x0)}" y="${t - 22}" width="${r1(Math.max(0.6, x1 - x0 + 0.3))}" height="12" fill="${PUB[k]}"/>`;
+  });
+  s += '</g>';
+  // phase shading and lines
+  s += `<g clip-path="url(#${cid})">`;
+  for (const sg of d.durations.segments) {
+    const x0 = sx(hours[sg.start] - dt / 2), x1 = sx(hours[sg.end] + dt / 2);
+    s += `<rect x="${r1(x0)}" y="${t}" width="${r1(Math.max(1, x1 - x0))}" height="${ph}" fill="${PUB[sg.phase]}" fill-opacity="0.2"/>`;
+  }
+  const th = d.frames.map((f) => hours[f]);
+  const line = (vals) => th.map((x, i) => (Number.isFinite(vals[i]) ? `${r1(sx(x))} ${r1(sy(vals[i]))}` : null)).filter(Boolean).join('L');
+  s += `<path d="M${line(d.g)}" fill="none" stroke="#2F9E44" stroke-width="2" stroke-linejoin="round"/>`;
+  s += `<path d="M${line(d.r)}" fill="none" stroke="#D6336C" stroke-width="2" stroke-linejoin="round"/></g>`;
+  s += yAxis(l, t, t + ph, yt, sy, (v) => (Math.round(v * 100) / 100).toString()) + xAxis(t + ph, l, l + pw, hourTicks(h0, h1), sx);
+  s += `<text x="${l + pw / 2}" y="${H - 10}" font-size="12" text-anchor="middle" fill="#000">Time (h)</text>`;
+  s += `<text x="18" y="${t + ph / 2}" font-size="12" text-anchor="middle" fill="#000" transform="rotate(-90 18 ${t + ph / 2})">Intensity (normalised)</text>`;
+  // legend
+  const lx = l + pw + 22;
+  let y = t + 4;
+  [['#2F9E44', 'PIP-mVenus'], ['#D6336C', 'mCherry-Geminin']].forEach(([c, n]) => {
+    s += `<path d="M${lx} ${y}H${lx + 22}" stroke="${c}" stroke-width="2"/><text x="${lx + 28}" y="${y + 4}" font-size="11" fill="#000">${n}</text>`;
+    y += 18;
+  });
+  y += 8;
+  s += `<text x="${lx}" y="${y + 4}" font-size="11" fill="#444">Phase</text>`;
+  y += 16;
+  ['G1', 'S', 'G2M', 'Colourless'].forEach((k) => {
+    s += `<rect x="${lx}" y="${y - 6}" width="14" height="11" fill="${PUB[k]}"/><text x="${lx + 20}" y="${y + 4}" font-size="11" fill="#000">${CAT_LABEL[k]}</text>`;
+    y += 17;
+  });
+  return s + '</svg>';
+}

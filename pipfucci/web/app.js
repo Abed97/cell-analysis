@@ -1503,10 +1503,11 @@ async function loadTrack(key) {
       <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px"><h2 style="font-size:18px">Track <span class="mono">${esc(label)}</span></h2><span class="fate">${esc(d.fate)}</span></div>
       <span class="small muted">${esc(d.well)} · field ${d.field} · ${esc(d.condition)} · ${lineage}${kids}</span>
       <div style="display:flex;flex-wrap:wrap;gap:6px">${flags}</div></div>
-    <div style="display:flex;flex-direction:column;gap:6px"><h3>Image montage</h3>
+    <div style="display:flex;flex-direction:column;gap:6px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3>Image montage</h3><button type="button" class="btn sm" id="mont-exp-btn" aria-expanded="${!!S.sc.mexpOpen}" aria-controls="mont-exp">${ICON.down} Export…</button></div>
+      <div class="exp-panel" id="mont-exp" style="margin-top:0" hidden></div>
       <div class="mont-grid"><div class="mont-labels"><span>Red</span><span>Green</span><span>Phase</span><span>Merge</span></div><img class="montage" src="/api/montage?key=${encodeURIComponent(d.key)}" alt="Image montage of this cell over time"></div>
       <div class="mont-grid"><span class="small muted">Call</span><div class="calls" style="grid-template-columns:repeat(${mcols},minmax(0,1fr))">${calls}</div></div></div>
-    <figure style="margin:0;display:flex;flex-direction:column;gap:6px"><figcaption class="legend"><strong style="font-size:13px;color:var(--text)">Traces</strong><span><span class="ln" style="background:#5FD487"></span>PIP-mVenus</span><span><span class="ln" style="background:#F07C99"></span>mCherry-Geminin</span><span class="muted">Shading = phase call</span></figcaption>${traces}</figure>
+    <figure style="margin:0;display:flex;flex-direction:column;gap:6px"><figcaption class="legend"><strong style="font-size:13px;color:var(--text)">Traces</strong><span><span class="ln" style="background:#5FD487"></span>PIP-mVenus</span><span><span class="ln" style="background:#F07C99"></span>mCherry-Geminin</span><span class="muted">Shading = phase call</span><button type="button" class="btn sm" id="tr-save" style="margin-left:auto">${ICON.down} Save PNG + SVG</button></figcaption>${traces}</figure>
     <div><h3 style="margin-bottom:4px">Phase durations</h3><table class="dur">${durRows}</table></div>
     <div style="display:flex;flex-wrap:wrap;gap:8px">
       <button class="btn" id="tr-exclude">${d.excluded ? 'Include track' : 'Exclude track'}</button>
@@ -1516,7 +1517,61 @@ async function loadTrack(key) {
   $('#tr-exclude').onclick = async () => { try { await api('track_flag', { key: d.key, excluded: !d.excluded }); toast(d.excluded ? 'Track included again.' : 'Track excluded from all results.'); loadHeatmap(); loadDurations(); } catch (er) { fail(er); } };
   $('#tr-rev').onclick = async () => { try { await api('track_flag', { key: d.key, reviewed: !d.reviewed }); loadTrack(d.key); } catch (er) { fail(er); } };
   $('#tr-view').onclick = () => { S.v.well = d.well; S.v.field = d.field; S.v.frame = d.frames[0]; S.v.sel = d.key; setView('viewer'); };
+  $('#mont-exp-btn').onclick = () => { S.sc.mexpOpen = !S.sc.mexpOpen; $('#mont-exp-btn').setAttribute('aria-expanded', String(S.sc.mexpOpen)); renderMontageExport(d); };
+  renderMontageExport(d);
+  $('#tr-save').onclick = async (ev) => {
+    const b = ev.currentTarget;
+    b.disabled = true;
+    try {
+      const r = await saveSVG(`Track ${d.well}-${d.field}-${d.tid} traces`, traceFigure(d, IX.zoom.trace || null));
+      toast('Saved the traces (PNG + SVG).', { action: { label: 'Show in Finder', fn: () => api('reveal', { path: r.path }).catch(fail) }, ms: 12000 });
+    } catch (er) { fail(er); }
+    b.disabled = false;
+  };
   loadTree(d.key);
+}
+
+const MONT_ROW_NAMES = { red: 'mCherry-Geminin', green: 'PIP-mVenus', phase: 'Phase', merge: 'Merge' };
+
+// Options for saving the track card's montage for a paper or a talk (annotate.track_montage).
+function renderMontageExport(d) {
+  const box = $('#mont-exp');
+  if (!box) return;
+  box.hidden = !S.sc.mexpOpen;
+  if (!S.sc.mexpOpen) return;
+  const o = S.sc.mexp || (S.sc.mexp = { fmt: 'png', scale: 4, n: 8, rows: ['red', 'green', 'phase', 'merge'], times: true, calls: true, title: true, bar: true, text: 'medium' });
+  const e = S.st.experiment;
+  const side = 2 * Math.floor(Math.max(12, (e.derived.nucleus_px || 20) * 1.6));  // as annotate.track_montage
+  const tile = side * o.scale;
+  const seg = (name, items) => `<div class="seg" role="group" aria-label="${name}">${items.map(([v, label, title]) => `<button type="button" data-mxo="${name}" data-v="${v}" aria-pressed="${String(o[name]) === String(v)}" ${title ? `title="${title}"` : ''}>${label}</button>`).join('')}</div>`;
+  box.innerHTML = `<div class="exp-grid">
+    <div class="exp-row"><span class="exp-l">Format</span>${seg('fmt', [['png', 'PNG', 'For slides and posters'], ['tif', 'TIFF', 'What most journals ask for'], ['svg', 'SVG', 'Editable in Illustrator, Inkscape or Affinity: the pictures are unchanged and every label is real text']])}</div>
+    <div class="exp-row"><span class="exp-l">Size</span>${seg('scale', [[2, '2×'], [4, '4×'], [8, '8×']])}<span class="small muted">Each picture ${tile} × ${tile} px (${side} camera pixels, ${num(side * e.settings.pixel_um)} µm across), ${(tile / 300 * 2.54).toFixed(1)} cm at 300 dpi. Pixels are repeated, never smoothed.</span></div>
+    <div class="exp-row"><label class="exp-l" for="mx-n">Time points</label><select class="input" id="mx-n" style="height:36px;flex:0 1 120px">${[4, 6, 8, 10, 12, 16, 24].map((v) => `<option value="${v}" ${o.n === v ? 'selected' : ''}>${v}</option>`).join('')}</select><span class="small muted">evenly spaced along this cell, from ${num(e.hours[d.start])} to ${num(e.hours[d.end])} h</span></div>
+    <div class="exp-row"><span class="exp-l">Rows</span>${['red', 'green', 'phase', 'merge'].map((k) => `<label class="chip"><input type="checkbox" data-mxr="${k}" ${o.rows.includes(k) ? 'checked' : ''}>${MONT_ROW_NAMES[k]}</label>`).join('')}</div>
+    <div class="exp-row"><span class="exp-l">Add</span>
+      <label class="chip"><input type="checkbox" data-mxc="times" ${o.times ? 'checked' : ''}>Time</label>
+      <label class="chip"><input type="checkbox" data-mxc="calls" ${o.calls ? 'checked' : ''}>Phase call</label>
+      <label class="chip"><input type="checkbox" data-mxc="title" ${o.title ? 'checked' : ''}>Title</label>
+      <label class="chip"><input type="checkbox" data-mxc="bar" ${o.bar ? 'checked' : ''}>Scale bar</label>
+      <label class="small muted" for="mx-text" style="margin-left:8px">Text size</label><select class="input" id="mx-text" style="height:36px;flex:0 1 130px">${['small', 'medium', 'large'].map((v) => `<option value="${v}" ${o.text === v ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+    <div class="exp-row" style="justify-content:flex-end"><span class="small muted" style="margin-right:auto">Saved in the experiment folder, under Figures › Images.</span><button type="button" class="btn primary" id="mx-go">Export</button></div>
+  </div>`;
+  $$('[data-mxo]', box).forEach((b) => b.onclick = () => { const k = b.dataset.mxo; o[k] = k === 'scale' ? +b.dataset.v : b.dataset.v; renderMontageExport(d); });
+  $$('[data-mxc]', box).forEach((c) => c.onchange = () => { o[c.dataset.mxc] = c.checked; });
+  $$('[data-mxr]', box).forEach((c) => c.onchange = () => { o.rows = ['red', 'green', 'phase', 'merge'].filter((k) => $(`[data-mxr="${k}"]`, box).checked); });
+  $('#mx-n').onchange = (ev) => { o.n = +ev.target.value; };
+  $('#mx-text').onchange = (ev) => { o.text = ev.target.value; };
+  $('#mx-go').onclick = async () => {
+    if (!o.rows.length) { toast('Tick at least one row.'); return; }
+    const btn = $('#mx-go');
+    btn.disabled = true; btn.textContent = 'Exporting…';
+    try {
+      const r = await api('export_montage', { key: d.key, ...o });
+      toast(`Saved the montage (${{ png: 'PNG', tif: 'TIFF', svg: 'SVG' }[o.fmt]}).`, { action: { label: 'Show in Finder', fn: () => api('reveal', { path: r.path }).catch(fail) }, ms: 12000 });
+    } catch (err) { fail(err); }
+    btn.disabled = false; btn.textContent = 'Export';
+  };
 }
 
 async function loadTree(key) {

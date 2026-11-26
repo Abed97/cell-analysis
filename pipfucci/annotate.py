@@ -456,3 +456,142 @@ def export(exp, well: str, field: int, frames: list[int], layers: set, fmt: str 
     first = pieces[0]
     size = (first[1], first[2]) if fmt == "svg" else first.size
     return {"folder": str(out), "paths": [str(p) for p in written], "size": list(size)}
+
+
+# ------------------------------------------------------------ one cell over time (montage)
+MONT_ROWS = ("red", "green", "phase", "merge")
+MONT_NAMES = {"red": "mCherry-Geminin", "green": "PIP-mVenus", "phase": "Phase", "merge": "Merge"}
+MONT_NAME_RGB = {"red": (200, 40, 90), "green": (40, 140, 60), "phase": (0, 0, 0), "merge": (0, 0, 0)}
+CALL_NAMES = {0: "G1", 1: "S", 2: "G2/M", 3: "Colourless"}
+CALL_RGB = {0: (46, 139, 62), 1: (208, 47, 53), 2: (179, 134, 0), 3: (120, 120, 120)}  # readable on white
+
+
+def track_montage(exp, key: str, n: int = 8, rows=MONT_ROWS, fmt: str = "png", scale: int = 4,
+                  calls: bool = True, times: bool = True, title: bool = True, bar: bool = True,
+                  text: str = "medium") -> dict:
+    """The track card's image montage for a paper: one column per time point along the cell, one
+    row per channel, with the time above and the phase call below each column, on white.
+
+    PNG and TIFF repeat the camera pixels (never smoothed) and draw the text at the output size,
+    300 dpi; SVG embeds the same tiles with real text, for Illustrator, Inkscape or Affinity."""
+    import time as _time
+
+    from PIL import Image, ImageDraw
+
+    from .render import montage_tiles
+
+    if exp.tracks is None or key not in exp.tracks.index:
+        raise ValueError("No such cell.")
+    fmt = fmt if fmt in ("png", "tif", "svg") else "png"
+    s = max(1, min(8, int(scale)))
+    rows = [r for r in MONT_ROWS if r in set(rows or [])] or list(MONT_ROWS)
+    cols, side = montage_tiles(exp, key, max(1, min(24, int(n))))
+    if not cols:
+        raise ValueError("This cell has no images.")
+    st = exp.settings
+    hours = list(exp.frame_hours())
+    t = exp.tracks.loc[key]
+    tile = side * s
+    fs = TEXT_SCALE.get(text, 1.0) * max(11.0, 0.17 * tile)
+    pad = round(0.6 * fs)
+    gap = max(2, round(0.04 * tile))
+    f_lab = _font(fs)
+    meas = ImageDraw.Draw(Image.new("RGB", (4, 4)))
+    tw = lambda msg, size=fs: meas.textlength(msg, font=_font(size))  # noqa: E731
+    lab_w = round(max(tw(MONT_NAMES[r]) for r in rows) + pad)
+    name = f"{t['well']}·{int(t['field'])}·{int(t['tid'])}" if "tid" in t else key
+    cond = (st.condition_of(t["well"]) or {}).get("name", "") if hasattr(st, "condition_of") else ""
+    head_txt = f"Track {name}" + (f" · {cond}" if cond else "")
+    title_h = round(1.6 * fs) if title else 0
+    time_h = round(1.5 * fs) if times else 0
+    call_h = round(1.5 * fs) if calls else 0
+    um = bar_um(side * 1.5, st.pixel_um) if bar and st.pixel_um > 0 else 0
+    foot_h = round(1.5 * fs) if um else 0
+    gx0, gy0 = pad + lab_w, pad + title_h + time_h
+    gw = len(cols) * tile + (len(cols) - 1) * gap
+    gh = len(rows) * tile + (len(rows) - 1) * gap
+    W, H = gx0 + gw + pad, gy0 + gh + call_h + foot_h + pad
+    # the call names have to fit under their tile
+    cfs = min(fs, fs * 0.94 * tile / max(1.0, max(tw(CALL_NAMES[c["call"]]) for c in cols)))
+    bar_len = um / st.pixel_um * s if um else 0
+    bh = max(2, round(0.06 * tile))
+    bx1, by1 = gx0 + gw - round(0.08 * tile), gy0 + gh - round(0.08 * tile)
+
+    def cx(j):
+        return gx0 + j * (tile + gap)
+
+    def cy(i):
+        return gy0 + i * (tile + gap)
+
+    stamp = _time.strftime("%Y-%m-%d %H%M%S")
+    root = exp.results_dir / "figures" / "Images"
+    root.mkdir(parents=True, exist_ok=True)
+    base = _safe(f"Track {name.replace('·', '-')} montage {stamp}")
+    path, k = root / f"{base}.{fmt}", 2
+    while path.exists():
+        path, k = root / f"{base} ({k}).{fmt}", k + 1
+
+    def big(arr):
+        a = (arr * 255).astype(np.uint8)
+        return np.repeat(np.repeat(a, s, axis=0), s, axis=1) if s > 1 else a
+
+    if fmt == "svg":
+        def esc(v):
+            return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        ff = 'font-family="Helvetica, Arial, sans-serif"'
+        out = [f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{W}" height="{H}" '
+               f'viewBox="0 0 {W} {H}" {ff}><rect width="{W}" height="{H}" fill="#FFFFFF"/>']
+        if title:
+            out.append(f'<text x="{pad}" y="{pad + fs:.1f}" font-size="{fs:.1f}" font-weight="700" fill="#000">{esc(head_txt)}</text>')
+        for j, c in enumerate(cols):
+            xm = cx(j) + tile / 2
+            if times:
+                h = hours[c["frame"]] if c["frame"] < len(hours) else 0.0
+                out.append(f'<text x="{xm:.1f}" y="{gy0 - 0.45 * fs:.1f}" font-size="{fs:.1f}" text-anchor="middle" fill="#000">{esc(fmt_hours(h))}</text>')
+            for i, r in enumerate(rows):
+                buf = io.BytesIO()
+                Image.fromarray(big(c["tiles"][r])).save(buf, format="PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                out.append(f'<image x="{cx(j)}" y="{cy(i)}" width="{tile}" height="{tile}" preserveAspectRatio="none" '
+                           f'style="image-rendering:pixelated" xlink:href="data:image/png;base64,{b64}"/>')
+            if calls:
+                col = _hex(CALL_RGB[c["call"]])
+                out.append(f'<text x="{xm:.1f}" y="{gy0 + gh + 1.05 * fs:.1f}" font-size="{cfs:.1f}" font-weight="700" text-anchor="middle" fill="{col}">{CALL_NAMES[c["call"]]}</text>')
+        for i, r in enumerate(rows):
+            out.append(f'<text x="{gx0 - pad / 2:.1f}" y="{cy(i) + tile / 2 + 0.35 * fs:.1f}" font-size="{fs:.1f}" text-anchor="end" '
+                       f'fill="{_hex(MONT_NAME_RGB[r])}">{MONT_NAMES[r]}</text>')
+        if um:
+            out.append(f'<rect x="{bx1 - bar_len:.1f}" y="{by1 - bh}" width="{bar_len:.1f}" height="{bh}" fill="#FFFFFF" stroke="#000" stroke-width="{max(1, s / 2):.1f}"/>')
+            out.append(f'<text x="{gx0 + gw:.1f}" y="{H - pad - 0.35 * fs:.1f}" font-size="{0.85 * fs:.1f}" text-anchor="end" fill="#000">Scale bar, {um} µm</text>')
+        out.append("</svg>")
+        path.write_text('<?xml version="1.0" encoding="UTF-8"?>\n' + "".join(out), encoding="utf-8")
+    else:
+        im = Image.new("RGB", (int(W), int(H)), (255, 255, 255))
+        for j, c in enumerate(cols):
+            for i, r in enumerate(rows):
+                im.paste(Image.fromarray(big(c["tiles"][r])), (int(cx(j)), int(cy(i))))
+        d = ImageDraw.Draw(im)
+        if title:
+            d.text((pad, pad), head_txt, fill=(0, 0, 0), font=_font(fs), anchor="lt", stroke_width=max(0, round(fs / 30)),
+                   stroke_fill=(0, 0, 0))
+        for j, c in enumerate(cols):
+            xm = cx(j) + tile / 2
+            if times:
+                h = hours[c["frame"]] if c["frame"] < len(hours) else 0.0
+                d.text((xm, gy0 - 0.45 * fs), fmt_hours(h), fill=(0, 0, 0), font=f_lab, anchor="ms")
+            if calls:
+                d.text((xm, gy0 + gh + 1.05 * fs), CALL_NAMES[c["call"]], fill=CALL_RGB[c["call"]], font=_font(cfs), anchor="ms",
+                       stroke_width=max(0, round(cfs / 30)), stroke_fill=CALL_RGB[c["call"]])
+        for i, r in enumerate(rows):
+            d.text((gx0 - pad / 2, cy(i) + tile / 2), MONT_NAMES[r], fill=MONT_NAME_RGB[r], font=f_lab, anchor="rm")
+        if um:
+            ow = max(1, round(s / 2))
+            d.rectangle([bx1 - bar_len - ow, by1 - bh - ow, bx1 + ow, by1 + ow], fill=(0, 0, 0))
+            d.rectangle([bx1 - bar_len, by1 - bh, bx1, by1], fill=(255, 255, 255))
+            d.text((gx0 + gw, H - pad - 0.35 * fs), f"Scale bar, {um} µm", fill=(0, 0, 0), font=_font(0.85 * fs), anchor="rs")
+        if fmt == "tif":
+            im.save(path, format="TIFF", compression="tiff_lzw", dpi=(300, 300))
+        else:
+            im.save(path, format="PNG", dpi=(300, 300))
+    return {"path": str(path), "folder": str(root), "size": [int(W), int(H)], "columns": len(cols)}

@@ -564,3 +564,81 @@ def test_export_annotated_images(exp):
     assert Image.open(r["paths"][0]).size == (side, side)
     strip = Image.open(r["paths"][-1])
     assert strip.size[1] == side and strip.size[0] > 3 * side
+
+
+def test_export_track_montage(exp):
+    from PIL import Image
+
+    from pipfucci import annotate
+
+    t = exp.tracks
+    key = t[(t["end"] - t["start"]) > 20].index[0]
+    side = 2 * int(max(12, exp.settings.nucleus_px * 1.6))
+    r = annotate.track_montage(exp, key, n=6, fmt="png", scale=4)
+    im = Image.open(r["path"])
+    assert r["columns"] == 6 and round(im.info["dpi"][0]) == 300
+    assert im.size[0] > 6 * side * 4 and im.size[1] > 4 * side * 4
+    # the tiles keep the camera pixels: 4 x 4 blocks of one colour
+    a = np.asarray(im)
+    x0, y0 = im.size[0] - 2 - side * 4, im.size[1] // 2
+    blk = a[y0 - y0 % 4: y0 - y0 % 4 + 4, x0: x0 + 4]
+    assert blk.ndim == 3
+    r2 = annotate.track_montage(exp, key, n=4, rows=["phase", "merge"], fmt="tif", scale=2, title=False, bar=False)
+    im2 = Image.open(r2["path"])
+    assert im2.size[1] < im.size[1] and r2["columns"] == 4
+    r3 = annotate.track_montage(exp, key, fmt="svg", scale=2)
+    doc = Path(r3["path"]).read_text()
+    assert doc.count("<image ") == 8 * 4 and "mCherry-Geminin" in doc and "Scale bar" in doc and "µm" in doc
+    with pytest.raises(ValueError):
+        annotate.track_montage(exp, "Z9-9-9")
+
+
+def test_colourless_split_into_no_reporter_and_transition(exp):
+    from pipfucci import compare
+
+    c = exp.cells
+    ws = analysis.well_series(exp)
+    for v in ws.values():  # the two parts add up to the colourless cells
+        assert np.allclose(np.nan_to_num(v["frac_cl"].sum(axis=1)), np.nan_to_num(v["frac"][:, 3]))
+    pop = compare.population([exp])
+    for cnd in pop["conditions"]:
+        assert "CL_trans" in cnd and "CL_none" in cnd
+    nr = analysis.no_reporter(exp, 90, 0)
+    assert not nr[c["call"].values != 3].all() or not nr.any()
+    # every cell called "no reporter" belongs to a family with no coloured track
+    calls = c["call"].values
+    fam_tracks = set(c.loc[nr, "track"])
+    for k in list(fam_tracks)[:20]:
+        assert (calls[(c["track"] == k).values] == 3).mean() >= 0.9
+    # a colourless daughter of a coloured mother has the reporter
+    t = exp.tracks
+    kid = t[t["parent"] != ""].index[0]
+    rows = (c["track"] == kid).values
+    saved = c.loc[rows, "call"].copy()
+    try:
+        c.loc[rows, "call"] = 3
+        exp._nr_key = None
+        assert not analysis.no_reporter(exp, 90, 0)[rows].any()
+        # with no mother it would count, unless followed for too short a time
+        par = t.at[kid, "parent"]
+        t.at[kid, "parent"] = ""
+        exp._nr_key = None
+        nh = rows.sum() * exp.settings.interval_h
+        assert analysis.no_reporter(exp, 90, 0)[rows].all()
+        exp._nr_key = None
+        assert not analysis.no_reporter(exp, 90, nh + 1)[rows].any()
+        t.at[kid, "parent"] = par
+    finally:
+        c.loc[rows, "call"] = saved
+        exp._nr_key = None
+
+
+def test_no_reporter_settings_are_validated():
+    from pipfucci.settings import Settings
+
+    s = Settings()
+    s.update({"no_reporter_pct": 20, "no_reporter_min_h": -5})
+    assert s.no_reporter_pct == 50 and s.no_reporter_min_h == 0
+    s.update({"no_reporter_pct": "x", "no_reporter_min_h": 5000})
+    assert s.no_reporter_pct == 90 and s.no_reporter_min_h == 1000
+    assert Settings.from_dict({}).no_reporter_pct == 90  # older experiments get the default

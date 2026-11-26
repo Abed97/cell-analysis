@@ -68,6 +68,9 @@ def selftest() -> int:
         rs = annotate.export(exp, "B2", 1, [3], lay, fmt="svg")
         assert len(ra["paths"]) == 3 and "nucleus-outlines" in Path(rs["paths"][0]).read_text()
         print("annotated image font:", getattr(annotate._font(20), "path", "built-in"), flush=True)
+        rm = annotate.track_montage(exp, key, n=6, fmt="tif")  # one cell over time, for the track card
+        assert Path(rm["path"]).stat().st_size > 1000 and rm["columns"] >= 1
+        assert len(analysis.no_reporter(exp)) == len(exp.cells)
         import numpy as np
 
         from . import stats  # box-plot statistics: scipy's tests in the bundle (Tukey, Dunnett, ...)

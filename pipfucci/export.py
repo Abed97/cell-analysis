@@ -77,6 +77,8 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
 
     for i, p in enumerate(analysis.CALLS):
         _prism_table(exp, ws, "frac", i).to_csv(prism / f"Phase fraction {PH_NAMES[p]} (%).csv", index=False)
+    for i, p in enumerate(analysis.CL_SPLIT):
+        _prism_table(exp, ws, "frac_cl", i).to_csv(prism / f"Phase fraction {analysis.CL_SPLIT_NAMES[p]} (%).csv", index=False)
     _prism_table(exp, ws, "count_norm").to_csv(prism / "Cell number (fold of t0).csv", index=False)
     _prism_table(exp, ws, "total").to_csv(prism / "Cell number (detected nuclei).csv", index=False)
     _prism_table(exp, ws, "confluence").to_csv(prism / "Confluence (%).csv", index=False)
@@ -97,9 +99,10 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
     pop = analysis.population(exp)
     rows = []
     for c in pop["conditions"]:
-        for metric in ["G1", "S", "G2M", "Colourless", "count_norm", "confluence", "colonies", "colony_area"]:
+        for metric in ["G1", "S", "G2M", "Colourless"] + analysis.CL_SPLIT + ["count_norm", "confluence", "colonies", "colony_area"]:
             for h, m, s in zip(pop["hours"], c[metric]["mean"], c[metric]["sem"]):
-                rows.append({"condition": c["name"], "metric": metric, "time_h": h, "mean": m, "sem": s,
+                rows.append({"condition": c["name"], "metric": analysis.CL_SPLIT_NAMES.get(metric, metric), "time_h": h,
+                             "mean": m, "sem": s,
                              "n_wells": len(c["wells"])})
     pd.DataFrame(rows).to_csv(out / "Summary mean and SEM per condition.csv", index=False)
 
@@ -112,6 +115,9 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
     cells["phase_call"] = cells["call" if "call" in cells else "phase"].map(names)
     cells["smoothed_phase"] = cells["phase"].map(names)
     cells["raw_gate_call"] = cells["raw"].map({0: "G1", 1: "S", 2: "G2-M", 3: "dim"})
+    nr = analysis.no_reporter(exp)
+    if len(nr) == len(cells):
+        cells["no_reporter"] = nr
     if "interp" in cells:
         cells["position_interpolated"] = cells.pop("interp").astype(bool)
     parents = exp.meta.get("parents", {})
@@ -153,7 +159,10 @@ def export_all(exp: Experiment, others: list | None = None) -> Path:
         "Prism tables/: one column per well, grouped by condition. Paste into a Prism grouped table.\n"
         "Phase calls are smoothed per track (order G1 -> S -> G2-M enforced). 'Colourless' means neither reporter\n"
         "was on (typically just after division); those cells are followed on phase contrast and their\n"
-        "position_interpolated rows are not counted as detected nuclei. Durations are only for phases\n"
+        "position_interpolated rows are not counted as detected nuclei. no_reporter marks cells whose whole\n"
+        f"family (mother, daughters) is colourless at least {exp.settings.no_reporter_pct:g}% of the time and followed at least\n"
+        f"{exp.settings.no_reporter_min_h:g} h; the other colourless "
+        "cells are in a transition. Durations are only for phases\n"
         f"fully observed inside the movie and carry +/- {ih:g} h (one frame). Cells present at the first frame,\n"
         "ending at the last frame, or at the field edge are censored and left out of durations.\n"
         "Statistics should be run on well means (biological replicates), never on individual cells.\n"

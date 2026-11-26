@@ -213,21 +213,20 @@ def montage_picks(exp, key: str, n: int = 8):
     return rows, [int(f) for f in rows["frame"].values]
 
 
-def montage(exp, key: str, n: int = 8, tile: int = 72):
-    """Rows: red, green, phase, merge; columns: n timepoints along the track."""
+def montage_tiles(exp, key: str, n: int = 8):
+    """The crops behind a montage, at the images' own resolution: one entry per time point along
+    the track, {frame, x, y, tiles: {red, green, phase, merge}} (RGB floats 0..1), and the crop
+    side in pixels."""
     t = exp.tracks.loc[key]
     rows, _ = montage_picks(exp, key, n)
+    half = int(max(12, exp.settings.nucleus_px * 1.6))
     if len(rows) == 0:
-        return np.zeros((tile, tile, 3), np.uint8), []
+        return [], 2 * half
     well, field = t["well"], int(t["field"])
     meta = exp.meta.get("movies", {}).get(f"{well}_{field}", {})
     ranges = meta.get("ranges", {})
-    half = int(max(12, exp.settings.nucleus_px * 1.6))
-    out = np.zeros((4 * tile + 3 * 2, len(rows) * tile + (len(rows) - 1) * 2, 3), dtype=np.uint8)
-    out[:] = 18
-    from PIL import Image
-
-    for j, (_, r) in enumerate(rows.iterrows()):
+    out = []
+    for _, r in rows.iterrows():
         cx, cy, fr = int(round(r["x"])), int(round(r["y"])), int(r["frame"])
         tiles = {}
         for ch in ("red", "green", "phase"):
@@ -240,13 +239,29 @@ def montage(exp, key: str, n: int = 8, tile: int = 72):
             rng = ranges.get(ch) or [float(np.percentile(im, 0.5)), float(np.percentile(im, 99.8))]
             tiles[ch] = _stretch(crop, rng)
         z = np.zeros((2 * half, 2 * half))
-        red_rgb = np.stack([tiles["red"], z, tiles["red"] * 0.25], -1)
-        green_rgb = np.stack([z, tiles["green"], z], -1)
-        phase_rgb = np.repeat(tiles["phase"][..., None], 3, -1)
-        merge = np.clip(np.stack([tiles["red"], tiles["green"], tiles["red"] * 0.25], -1), 0, 1)
-        for i, arr in enumerate((red_rgb, green_rgb, phase_rgb, merge)):
-            im8 = Image.fromarray((np.clip(arr, 0, 1) * 255).astype(np.uint8)).resize((tile, tile), Image.BILINEAR)
+        rgb = {"red": np.stack([tiles["red"], z, tiles["red"] * 0.25], -1),
+               "green": np.stack([z, tiles["green"], z], -1),
+               "phase": np.repeat(tiles["phase"][..., None], 3, -1),
+               "merge": np.stack([tiles["red"], tiles["green"], tiles["red"] * 0.25], -1)}
+        out.append({"frame": fr, "x": float(r["x"]), "y": float(r["y"]),
+                    "call": int(r["call"] if "call" in r else r["phase"]),
+                    "tiles": {k: np.clip(v, 0, 1) for k, v in rgb.items()}})
+    return out, 2 * half
+
+
+def montage(exp, key: str, n: int = 8, tile: int = 72):
+    """Rows: red, green, phase, merge; columns: n timepoints along the track."""
+    cols, _ = montage_tiles(exp, key, n)
+    if not cols:
+        return np.zeros((tile, tile, 3), np.uint8), []
+    out = np.zeros((4 * tile + 3 * 2, len(cols) * tile + (len(cols) - 1) * 2, 3), dtype=np.uint8)
+    out[:] = 18
+    from PIL import Image
+
+    for j, col in enumerate(cols):
+        for i, k in enumerate(("red", "green", "phase", "merge")):
+            im8 = Image.fromarray((col["tiles"][k] * 255).astype(np.uint8)).resize((tile, tile), Image.BILINEAR)
             y0 = i * (tile + 2)
             x0 = j * (tile + 2)
             out[y0:y0 + tile, x0:x0 + tile] = np.asarray(im8)
-    return out, [int(f) for f in rows["frame"].values]
+    return out, [c["frame"] for c in cols]
